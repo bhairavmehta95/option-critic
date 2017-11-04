@@ -62,7 +62,7 @@ class AOCAgent_THEANO():
     current_option_q = q_vals[T.arange(o.shape[0]), o] # Given that we are in option o (and s, from above), get all q values for each action
     disc_opt_q = disc_q[T.arange(o.shape[0]), o] # get all relevant gradients for each action
     terms = self.termination_model.apply(s) 
-    o_term = terms[T.arange(o.shape[0]), o] # get all terminations for each action? 
+    o_term = terms[T.arange(o.shape[0]), o] # get all terminations for each option 
     V = T.max(q_vals, axis=1)*(1-self.args.option_epsilon) + (self.args.option_epsilon*T.mean(q_vals, axis=1)) # same as Value function in A3C; has value for each policy, argmax it
     disc_V = theano.gradient.disconnected_grad(V) 
 

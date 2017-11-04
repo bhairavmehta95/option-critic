@@ -74,7 +74,7 @@ class Model():
             )
 
         elif model["model_type"] == "flatten":
-            return tf.reshape(inputs, [-1, 82140]) # TODO: Use Reshape
+            return tf.reshape(inputs, [-1, 3136]) # TODO: Use Reshape and Model size
 
         elif model["model_type"] == "mlp":
             layer = tf.layers.dense(
@@ -91,7 +91,7 @@ class Model():
                 layer = tf.layers.dense(
                     inputs=inputs,
                     units=self.num_options,
-                    activation=self.get_activation(model),
+                    activation=tf.nn.sigmoid,
                     kernel_initializer=get_init(model, "W"),
                     bias_initializer=get_init(model, "b"),
                     name='termination_fn'
@@ -101,17 +101,27 @@ class Model():
                 layer = tf.layers.dense(
                     inputs=inputs,
                     units=self.num_options + self.num_actions,
-                    activation=self.get_activation(model),
+                    activation=tf.nn.softmax,
                     kernel_initializer=get_init(model, "W"),
                     bias_initializer=get_init(model, "b"),
                     name='policy_over_options'
+                )
+
+            elif name == 'q_values_options':
+                layer = tf.layers.dense(
+                    inputs=inputs,
+                    units=self.num_options,
+                    activation=None,
+                    kernel_initializer=get_init(model, "W"),
+                    bias_initializer=get_init(model, "b"),
+                    name='q_values_options'
                 )
 
             else:
                 layer = tf.layers.dense(
                     inputs=inputs,
                     units=self.num_actions,
-                    activation=self.get_activation(model),
+                    activation=None,
                     kernel_initializer=get_init(model, "W"),
                     bias_initializer=get_init(model, "b"),
                     name=name
@@ -132,9 +142,6 @@ class Model():
                  {"model_type": "mlp", "out_size": 300, "activation": "tanh"},
                  {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
         """
-        # self.theano_rng = RandomStreams(rng)
-        # rng = np.random.RandomState(rng)
-        # lasagne.random.set_rng(rng)
 
         tf.set_random_seed(rng)
         self.num_options = num_options
@@ -144,7 +151,7 @@ class Model():
         model = [model_in] if isinstance(model_in, dict) else model_in
 
         self.X = tf.placeholder(dtype=tf.float32, shape=[None, 84, 84, 4]) # Input to network, 4 frames?
-        
+
         input_tensor = self.X
 
         print("Building following model...")
@@ -152,7 +159,7 @@ class Model():
 
         self.model = model
         self.input_size = input_size
-        self.out_size = model_in[-1]["out_size"]
+        self.out_size = model_in[-2]["out_size"]
         self.dnn_type = dnn_type
 
         # Build NN
@@ -163,11 +170,14 @@ class Model():
             new_layer = self.create_layer(input_tensor, m, dnn_type=dnn_type)
             input_tensor = new_layer
 
+        self.state_representation = input_tensor
+
         m = dict()
         m["model_type"] = 'option'
         
         self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
         self.policy_over_options = self.create_layer(input_tensor, m, dnn_type, name='policy_over_options')
+        self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
 
         self.intra_options = list()
         for i in range(self.num_options):
@@ -189,11 +199,12 @@ class Model():
 
 if __name__ == '__main__':
     model = [
-        {"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5, "name": "conv1"},
-        {"model_type": "conv", "filter_size": [7,7], "pool": [1,1], "stride": [1,1], "out_size": 15, "name": "conv2"},
+        {"model_type": "conv", "filter_size": [8,8], "pool": [1,1], "stride": [4,4], "out_size": 32, "name": "conv1"},
+        {"model_type": "conv", "filter_size": [4,4], "pool": [1,1], "stride": [2,2], "out_size": 64, "name": "conv2"},
+        {"model_type": "conv", "filter_size": [3,3], "pool": [1,1], "stride": [1,1], "out_size": 64, "name": "conv3"},
         {"model_type": "flatten"},
-        {"model_type": "mlp", "out_size": 300, "activation": "tanh", "name": "fc1"},
-        {"model_type": "mlp", "out_size": 10, "activation": "softmax", "name": "fc2"}
+        {"model_type": "mlp", "out_size": 512, "activation": "sigmoid", "name": "fc1"},
+        {"model_type": "option"}
     ]
 
     m = Model(model)
