@@ -3,7 +3,7 @@ import tensorflow as tf
 import math, csv, time, sys, os, pdb, copy
 
 
-def get_activition(activation):
+def get_activation(activation):
     if activation == "softmax":
         output = tf.nn.softmax
     elif activation is None:
@@ -25,68 +25,26 @@ def get_activition(activation):
     return output
 
 
-def get_init(model, t):
-    initializers = {"zeros": tf.constant_initializer(0.), "norm": tf.normal_initializer(0.1)}
-    if t not in m:
+def get_init(model, t, conv=False):
+    initializers = {"zeros": tf.constant_initializer(0.), "norm": tf.random_normal_initializer(0.1)}
+
+    if conv:
+        return tf.random_normal_initializer()
+
+    if t not in model:
         if t == "b":
             return tf.constant_initializer(0.)
     
-        return tf.glorot_uniform_initializer()
+        return tf.random_normal_initializer()
 
-    elif isinstance(m[t], basestring):
-        return inits[m[t]]
+    elif isinstance(model[t], basestring):
+        return initializers[model[t]]
 
-    elif isinstance(m[t], int):
-        return tf.constant_initializer(m[t])
+    elif isinstance(model[t], int):
+        return tf.constant_initializer(model[t])
 
     else:
-        return m[t]
-
-
-class MLP3D():
-    def __init__(self, input_size=None, num_options=None, num_outputs=None, activation="softmax"):
-        option_out_size = num_options
-
-        def _initializer(num_options, input_size, option_out_size):
-            limits = (6./np.sqrt(input_size + option_out_size))/num_options
-            return np.random.uniform(size=(num_options, input_size, option_out_size), high=limits, low=-limits)
-
-        self.options_W = tf.get_variable(
-            name="options_W", 
-            size=[num_options, input_size, option_out_size], 
-            dtype=tf.float32,
-            initializer=_modified_glorot(num_options, input_size, option_out_size)
-        )
-
-        self.options_b = tf.get_variable(
-            name="options_b",
-            size=[num_options, option_out_size],
-            dtype=tf.float32,
-            initializer=tf.zeros_initializer()
-        )
-
-        self.activation = get_activation(activation)
-        self.params = [self.options_W, self.options_b]
-
-    def apply(self, inputs, option=None):
-        W = self.options_W[option]
-        b = self.options_b[option]
-
-        inputs = tf.expand_dims(inputs, len(inputs) - 1)
-        out = tf.matmul(inputs, W) + b
-
-        # Original: T.sum(inputs.dimshuffle(0,1,'x')*W, axis=1) + b
-
-        return out if self.activation is None else self.activation(out)
-
-    def save_params(self):
-        return [i.get_value() for i in self.params]
-
-    def load_params(self, values):
-        print("LOADING NNET..")
-        for p, value in zip(self.params, values):
-            p.set_value(value.astype("float32"))
-        print("LOADED")
+        return model[t]
 
 
 class Model():
@@ -97,23 +55,26 @@ class Model():
         activation = model["activation"] if "activation" in model else "linear"
         return get_activation(activation)
 
-    def create_layer(self, inputs, model, dnn_type=True):
+    def create_layer(self, inputs, model, dnn_type=True, name=None):
+        layer = None
         if model["model_type"] == "conv":
-            conv_type = tf.layers.conv2d
-
             poolsize = tuple(model["pool"]) if "pool" in model else (1,1)
             stride = tuple(model["stride"]) if "stride" in model else (1,1)
 
-            layer = conv_type(
+            layer = tf.layers.conv2d(
                 inputs=inputs, 
                 filters=model["out_size"], 
                 kernel_size=model["filter_size"], 
                 strides=stride, 
-                nonlinearity=self.get_activation(model),
-                kernel_initializer=get_init(model, "W"),
+                activation=self.get_activation(model),
+                kernel_initializer=get_init(model, "W", conv=True),
                 bias_initializer=get_init(model, "b"),
-                padding="valid" if "pad" not in model else model["pad"]
+                padding="valid" if "pad" not in model else model["pad"],
+                name=model["name"]
             )
+
+        elif model["model_type"] == "flatten":
+            return tf.reshape(inputs, [-1, 82140]) # TODO: Use Reshape
 
         elif model["model_type"] == "mlp":
             layer = tf.layers.dense(
@@ -121,19 +82,49 @@ class Model():
                 units=model["out_size"],
                 activation=self.get_activation(model),
                 kernel_initializer=get_init(model, "W"),
-                bias_initializer=get_init(model, "b")
+                bias_initializer=get_init(model, "b"),
+                name=model["name"]
             )
     
         elif model["model_type"] == "option":
-            layer = MLP3D(model, inputs, nonlinearity=self.get_activation(model))
+            if name == 'termination_fn':
+                layer = tf.layers.dense(
+                    inputs=inputs,
+                    units=self.num_options,
+                    activation=self.get_activation(model),
+                    kernel_initializer=get_init(model, "W"),
+                    bias_initializer=get_init(model, "b"),
+                    name='termination_fn'
+                )
+
+            elif name == 'policy_over_options':
+                layer = tf.layers.dense(
+                    inputs=inputs,
+                    units=self.num_options + self.num_actions,
+                    activation=self.get_activation(model),
+                    kernel_initializer=get_init(model, "W"),
+                    bias_initializer=get_init(model, "b"),
+                    name='policy_over_options'
+                )
+
+            else:
+                layer = tf.layers.dense(
+                    inputs=inputs,
+                    units=self.num_actions,
+                    activation=self.get_activation(model),
+                    kernel_initializer=get_init(model, "W"),
+                    bias_initializer=get_init(model, "b"),
+                    name=name
+                )
 
         else:
             print "UNKNOWN LAYER NAME"
             raise NotImplementedError
 
+        print(model["model_type"], "is done")
         return layer
 
-    def __init__(self, model_in, input_size=None, rng=1234, dnn_type=False):
+    def __init__(self, model_in, input_size=None, rng=1234, dnn_type=False, num_options=4, num_actions=3):
         """
         example model:
         model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
@@ -146,13 +137,15 @@ class Model():
         # lasagne.random.set_rng(rng)
 
         tf.set_random_seed(rng)
+        self.num_options = num_options
+        self.num_actions = num_actions
 
         new_layer = tuple(input_size) if isinstance(input_size, list) else input_size
         model = [model_in] if isinstance(model_in, dict) else model_in
 
-        X = tf.placeholder(dtype=tf.float32, shape=[None, 84, 84, 4]) # Input to network
+        self.X = tf.placeholder(dtype=tf.float32, shape=[None, 84, 84, 4]) # Input to network, 4 frames?
         
-        input_tensor = X
+        input_tensor = self.X
 
         print("Building following model...")
         print(model)
@@ -164,22 +157,24 @@ class Model():
 
         # Build NN
         for i, m in enumerate(model):
+            if m["model_type"] == 'option':
+                break
+
             new_layer = self.create_layer(input_tensor, m, dnn_type=dnn_type)
             input_tensor = new_layer
 
+        m = dict()
+        m["model_type"] = 'option'
+        
+        self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
+        self.policy_over_options = self.create_layer(input_tensor, m, dnn_type, name='policy_over_options')
+
+        self.intra_options = list()
+        for i in range(self.num_options):
+            intra_option = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='intra_option_{}'.format(i))
+            self.intra_options.append(intra_option)
+
         print("Build complete.")
-
-        return input_tensor
-
-    # Don't need to do this anymore, can just pass in X as input tensor with feed dict
-    # def apply(self, x):
-    #     last_layer_inputs = x
-    #     for i, m in enumerate(self.model):
-    #         if m["model_type"] in ["mlp", "logistic", "advantage"] and last_layer_inputs.ndim > 2:
-    #             last_layer_inputs = last_layer_inputs.flatten(2)
-
-    #         last_layer_inputs = self.layers[i].get_output_for(last_layer_inputs)
-    #     return last_layer_inputs
 
     def save_params(self):
         return [i.get_value() for i in self.params]
@@ -191,3 +186,30 @@ class Model():
             p.set_value(value.astype("float32"))
 
         print("LOADED")
+
+if __name__ == '__main__':
+    model = [
+        {"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5, "name": "conv1"},
+        {"model_type": "conv", "filter_size": [7,7], "pool": [1,1], "stride": [1,1], "out_size": 15, "name": "conv2"},
+        {"model_type": "flatten"},
+        {"model_type": "mlp", "out_size": 300, "activation": "tanh", "name": "fc1"},
+        {"model_type": "mlp", "out_size": 10, "activation": "softmax", "name": "fc2"}
+    ]
+
+    m = Model(model)
+
+    with tf.Session() as sess:
+        init_op = tf.global_variables_initializer()
+        l_init_op = tf.local_variables_initializer()
+
+        writer = tf.summary.FileWriter('log', sess.graph)
+
+        pseudo_input = np.zeros([1, 84, 84, 4])
+        feed_dict = {m.X : pseudo_input}
+
+        sess.run(init_op)
+        sess.run(l_init_op)
+
+        init_ops = [m.termination_fn, m.policy_over_options] + m.intra_options
+        summary = sess.run(init_ops, feed_dict=feed_dict)
+        # writer.add_summary(summary)
