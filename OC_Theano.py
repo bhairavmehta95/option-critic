@@ -49,7 +49,7 @@ class AOCAgent_THEANO():
     self.set_rms_shared_weights(shared_arr)
 
     x = T.ftensor4() # State
-    y = T.fvector() # ? -- is this reward
+    y = T.fvector() # Onestep Return?
     a = T.ivector() # Action
     o = T.ivector() # Option
     delib = T.fscalar()
