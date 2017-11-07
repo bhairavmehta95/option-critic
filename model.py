@@ -117,6 +117,16 @@ class Model():
                     name='q_values_options'
                 )
 
+            elif name == "value":
+                layer = tf.layers.dense(
+                    inputs=inputs,
+                    units=1,
+                    activation=None,
+                    kernel_initializer=get_init(model, "W"),
+                    bias_initializer=get_init(model, "b"),
+                    name='value'
+                )
+
             else:
                 layer = tf.layers.dense(
                     inputs=inputs,
@@ -134,7 +144,7 @@ class Model():
         print(model["model_type"], "is done")
         return layer
 
-    def __init__(self, model_in, input_size=None, rng=1234, dnn_type=False, num_options=4, num_actions=3):
+    def __init__(self, model_in, input_size=None, rng=1234, dnn_type=False, num_options=4, num_actions=3, scope='global'):
         """
         example model:
         model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
@@ -146,11 +156,7 @@ class Model():
         tf.set_random_seed(rng)
         self.num_options = num_options
         self.num_actions = num_actions
-
-        new_layer = tuple(input_size) if isinstance(input_size, list) else input_size
-        model = [model_in] if isinstance(model_in, dict) else model_in
-
-        self.X = tf.placeholder(dtype=tf.float32, shape=[None, 84, 84, 4]) # Input to network, 4 frames?
+        self.observations = tf.placeholder(shape=[None, 84, 84, 4], dtype=tf.float32)
 
         input_tensor = self.X
 
@@ -162,9 +168,9 @@ class Model():
         self.out_size = model_in[-2]["out_size"]
         self.dnn_type = dnn_type
 
-        # Build NN
+        # Build Nain NN
         for i, m in enumerate(model):
-            if m["model_type"] == 'option':
+            if m["model_type"] == 'option' or m["model_type"] == 'value':
                 break
 
             new_layer = self.create_layer(input_tensor, m, dnn_type=dnn_type)
@@ -172,19 +178,58 @@ class Model():
 
         self.state_representation = input_tensor
 
+
         m = dict()
         m["model_type"] = 'option'
         
+        # Build Option Related End Networks 
         self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
         self.policy_over_options = self.create_layer(input_tensor, m, dnn_type, name='policy_over_options')
         self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
 
-        self.intra_options = list()
+        self.intra_options_q_vals = list()
         for i in range(self.num_options):
             intra_option = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='intra_option_{}'.format(i))
-            self.intra_options.append(intra_option)
+            self.intra_options_q_vals.append(intra_option)
+
+        m = dict()
+        m["model_type"] = 'value'
+
+        self.value_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='value')
 
         print("Build complete.")
+
+        if scope != 'global':
+            print("Building worker specific operations.")
+
+            self.actions = tf.placeholder(shape=[None], dtype=tf.float32)
+            self.actions_onehot = tf.onehot(self.actions, self.num_actions, dtype=tf.float32)
+
+            self.options = tf.placeholder(shape=[None], dtype=tf.float32)
+            self.options_onehot = tf.onehot(self.options, self.num_options, dtype=tf.float32)
+
+            self.targets = tf.placeholder(shape=[None], dtype=tf.float32)
+            self.advantages = tf.placeholder(shape=[None], dtype=tf.float32)
+
+            self.index_of_option = tf.argmax(options_onehot)
+            self.responsible_actions = tf.reduce_sum(self.actions_onehot * self.intra_options_q_vals[index_of_option])
+            self.responsible_options = tf.reduce_sum(self.options_onehot * self.policy_over_options)
+            self.responsible_termination = tf.reduce_sum(self.options_onehot * self.termination_fn)
+
+            # Loss functions -- TODO
+            self.value_loss = 0.5 * tf.reduce_sum(tf.square(self.targets - tf.reshape(self.value_fn, [-1])))
+            self.termination_gradient = 0.0 # TODO
+            self.entropy = -1 * tf.reduce_sum(self.actions*tf.log(self.actions + log_eps)) * args.entropy_reg
+            self.policy_loss = -1 * tf.reduce_sum(tf.log(self.responsile_actions)*self.advantages)
+            self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_gradient
+
+            local_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope)
+            self.gradients = tf.gradients(self.loss, local_vars)
+            self.var_norms = tf.global_norm(local_vars)
+
+            grads, self.grad_norms = tf.clip_by_global_norm(self.gradients, 40.0)
+            global_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'global')
+            self.apply_grads = trainer.apply_gradients(zip(grads,global_vars))
 
     def save_params(self):
         return [i.get_value() for i in self.params]
@@ -204,7 +249,8 @@ if __name__ == '__main__':
         {"model_type": "conv", "filter_size": [3,3], "pool": [1,1], "stride": [1,1], "out_size": 64, "name": "conv3"},
         {"model_type": "flatten"},
         {"model_type": "mlp", "out_size": 512, "activation": "sigmoid", "name": "fc1"},
-        {"model_type": "option"}
+        {"model_type": "option"},
+        {"model_type": "value"}
     ]
 
     m = Model(model)
