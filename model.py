@@ -19,7 +19,7 @@ def get_activation(activation):
     elif activation == "sigmoid":
         output = tf.nn.sigmoid
     else:
-        print "activation not recognized:", activation
+        print("activation not recognized:", activation)
         raise NotImplementedError
 
     return output
@@ -139,13 +139,12 @@ class Model():
                 )
 
         else:
-            print "UNKNOWN LAYER NAME"
+            print("UNKNOWN LAYER NAME")
             raise NotImplementedError
 
-        print(model["model_type"], "is done")
         return layer
 
-    def __init__(self, model_in, scope, args, input_size=None, rng=1234, dnn_type=False, num_options=4, num_actions=3):
+    def __init__(self, model_in, scope, args, trainer, input_size=None, rng=1234, dnn_type=False, num_options=4, num_actions=3):
         """
         example model:
         model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
@@ -154,102 +153,95 @@ class Model():
                  {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
         """
 
-        tf.set_random_seed(rng)
+        with tf.variable_scope(scope):
+            tf.set_random_seed(rng)
 
-        self.args = args
-        self.num_options = num_options
-        self.num_actions = num_actions
-        self.observations = tf.placeholder(shape=[None, 84, 84, 4], dtype=tf.float32)
+            self.args = args
+            self.num_options = num_options
+            self.num_actions = num_actions
+            self.observations = tf.placeholder(shape=[None, 84, 84, 4], dtype=tf.float32)
 
-        input_tensor = self.observations
+            input_tensor = self.observations
 
-        print("Building following model...")
-        print(model)
+            print("Building following model...")
+            print(model)
 
-        self.model = model
-        self.input_size = input_size
-        self.out_size = model_in[-3]["out_size"]
-        self.dnn_type = dnn_type
+            self.model = model
+            self.input_size = input_size
+            self.out_size = model_in[-3]["out_size"]
+            self.dnn_type = dnn_type
 
-        # Build Nain NN
-        for i, m in enumerate(model):
-            if m["model_type"] == 'option' or m["model_type"] == 'value':
-                break
+            # Build Nain NN
+            for i, m in enumerate(model):
+                if m["model_type"] == 'option' or m["model_type"] == 'value':
+                    break
 
-            new_layer = self.create_layer(input_tensor, m, dnn_type=dnn_type)
-            input_tensor = new_layer
+                new_layer = self.create_layer(input_tensor, m, dnn_type=dnn_type)
+                input_tensor = new_layer
 
-        self.state_representation = input_tensor
+            self.state_representation = input_tensor
 
-        m = dict()
-        m["model_type"] = 'value'
+            m = dict()
+            m["model_type"] = 'value'
 
-        self.value_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='value')
+            self.value_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='value')
 
-        m = dict()
-        m["model_type"] = 'option'
-        
-        # Build Option Related End Networks 
-        self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
-        self.policy_over_options = self.create_layer(input_tensor, m, dnn_type, name='policy_over_options')
-        self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
-
-        self.intra_options_q_vals = list()
-        for i in range(self.num_options):
-            intra_option = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='intra_option_{}'.format(i))
-            self.intra_options_q_vals.append(intra_option)
-
-        print("Build complete.")
-
-        if scope != 'global':
-            print("Building worker specific operations.")
-
-            self.actions = tf.placeholder(shape=[None], dtype=tf.int32)
-            self.options = tf.placeholder(shape=[None], dtype=tf.int32)
-            self.raw_rewards = tf.placeholder(shape=[None], dytpe=tf.float32)
-
-            self.batch_size = np.arange(actions.shape[0])
-
-            # TODO: self.deliberation_cost = tf.placeholder()
-
-            # TODO: Check shapes and gather ops - tf.eager?
-            self.targets = tf.placeholder(shape=[None], dtype=tf.float32)
-            self.advantages = tf.placeholder(shape=[None], dtype=tf.float32)
-
-            self.responsible_options = tf.stack([self.batch_size, self.options], axis=1)
-            self.responsible_actions = tf.stack([self.batch_size, self.options, self.actions], axis=1)
-            self.responsible_termination = tf.stack([self.batch_size, self.termination_fn], axis=1)
-
-            self.disconnected_q_vals = tf.stop_gradient(self.q_values_options)
-            self.option_q_vals = tf.gather_nd(params=q_values_options, indices=responsible_options) # Extract q values for each option
-            self.disconnected_option_q_vals = tf.gather_nd(params=disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
-            self.terminations = tf.gather_nd(params=self.termination_fn, indices=responsible_termination)
-          
-            self.relevant_networks = tf.gather(params=self.intra_options_q_vals, indices=self.responsible_options) # Gather the relevant option networks for each
-
-            self.relevant_networks = tf.stack([self.batch_size, self.relevant_networks], axis=1)
-            self.action_values = tf.gather_nd(params=self.relevant_networks, indices=self.responsible_actions)
-
-            self.value = tf.max(self.q_values_options) * (1 - self.args.option_eps) + (self.args.option_eps * tf.mean(self.q_values_options))
-            self.disconnected_value = tf.stop_gradient(self.value)
-
-            # Loss functions 
-
-            self.value_loss = 0.5 * tf.reduce_sum(self.args.critic_coef * tf.square(self.targets - tf.reshape(self.value_fn, [-1])))
-            self.policy_loss = -1 * tf.reduce_sum(tf.log(self.responsible_actions)*(self.raw_rewards - self.disconnected_option_q_vals))
-            self.termination_gradient = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.delib) )
-            self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
+            m = dict()
+            m["model_type"] = 'option'
             
-            
-            self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_gradient
+            # Build Option Related End Networks 
+            self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
+            self.policy_over_options = self.create_layer(input_tensor, m, dnn_type, name='policy_over_options')
+            self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
 
-            # local_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope)
-            # self.gradients = tf.gradients(self.loss, local_vars)
-            # self.var_norms = tf.global_norm(local_vars)
+            self.intra_options_q_vals = list()
+            for i in range(self.num_options):
+                intra_option = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='intra_option_{}'.format(i))
+                self.intra_options_q_vals.append(intra_option)
 
-            # grads, self.grad_norms = tf.clip_by_global_norm(self.gradients, 40.0)
-            # global_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'global')
-            # self.apply_grads = trainer.apply_gradients(zip(grads,global_vars))
+            print("Build complete.")
+
+            if scope != 'global':
+                print("Building worker specific operations.")
+
+                self.actions = tf.placeholder(shape=[None], dtype=tf.int32)
+                self.options = tf.placeholder(shape=[None], dtype=tf.int32)
+                self.raw_rewards = tf.placeholder(shape=[None], dtype=tf.float32)
+                self.targets = tf.placeholder(shape=[None], dtype=tf.float32)
+
+                self.batch_size = tf.range(tf.shape(self.actions)[0])
+
+                self.responsible_options = tf.stack([self.batch_size, self.options], axis=1)
+                self.responsible_actions = tf.stack([self.batch_size, self.actions], axis=1)
+
+                self.disconnected_q_vals = tf.stop_gradient(self.q_values_options)
+                self.option_q_vals = tf.gather_nd(params=self.q_values_options, indices=self.responsible_options) # Extract q values for each option
+                self.disconnected_option_q_vals = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
+                self.terminations = tf.gather_nd(params=self.termination_fn, indices=self.responsible_options)
+                
+                self.action_values = tf.gather_nd(params=self.intra_options_q_vals, indices=self.responsible_options) # TODO: Check                
+                self.action_values = tf.gather_nd(params=self.action_values, indices=self.responsible_actions)
+
+                self.value = tf.reduce_max(self.q_values_options) * (1 - self.args.option_eps) + (self.args.option_eps * tf.reduce_mean(self.q_values_options))
+                self.disconnected_value = tf.stop_gradient(self.value)
+
+                # Loss functions 
+
+                self.value_loss = 0.5 * tf.reduce_sum(self.args.critic_coef * tf.square(self.targets - tf.reshape(self.value_fn, [-1])))
+                self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.raw_rewards - self.disconnected_option_q_vals))
+                self.termination_gradient = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.args.delib) )
+                self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
+                
+                
+                self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_gradient
+
+                local_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope)
+                self.gradients = tf.gradients(self.loss, local_vars)
+                self.var_norms = tf.global_norm(local_vars)
+
+                grads, self.grad_norms = tf.clip_by_global_norm(self.gradients, 40.0)
+                global_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'global')
+                self.apply_grads = trainer.apply_gradients(zip(grads,global_vars))
 
     def save_params(self):
         return [i.get_value() for i in self.params]
@@ -273,20 +265,40 @@ if __name__ == '__main__':
         {"model_type": "value"}
     ]
 
-    m = Model(model, scope='worker_1')
+    args = type('', (), {})()
 
-    # with tf.Session() as sess:
-    #     init_op = tf.global_variables_initializer()
-    #     l_init_op = tf.local_variables_initializer()
+    args.option_eps = 0.01
+    args.critic_coef = 0.01
+    args.delib = 0.001
 
-    #     writer = tf.summary.FileWriter('log', sess.graph)
+    trainer = tf.train.RMSPropOptimizer(learning_rate=0.001)
+    m_global = Model(model, scope='global', trainer=trainer, args=args)
+    m = Model(model, scope='worker_1', trainer=trainer, args=args)
 
-    #     pseudo_input = np.zeros([1, 84, 84, 4])
-    #     feed_dict = {m.X : pseudo_input}
+    with tf.Session() as sess:
 
-    #     sess.run(init_op)
-    #     sess.run(l_init_op)
+        init_op = tf.global_variables_initializer()
+        l_init_op = tf.local_variables_initializer()
 
-    #     init_ops = [m.termination_fn, m.policy_over_options] + m.intra_options
-    #     summary = sess.run(init_ops, feed_dict=feed_dict)
-        # writer.add_summary(summary)
+        writer = tf.summary.FileWriter('log', sess.graph)
+
+        obs = np.zeros([1, 84, 84, 4])
+        actions = [1]
+        options = [1]
+        raw_rewards = [0.5]
+        targets = [0.8]
+
+        feed_dict = {
+            m.observations : obs,
+            m.actions: actions,
+            m.options: options,
+            m.raw_rewards: raw_rewards,
+            m.targets: targets
+        }
+
+        sess.run(init_op)
+        sess.run(l_init_op)
+
+        init_ops = [m.grad_norms]
+        summary = sess.run(init_ops, feed_dict=feed_dict)
+        writer.add_summary(summary)
