@@ -108,16 +108,6 @@ class Model():
                     name='termination_fn'
                 )
 
-            elif name == 'policy_over_options':
-                layer = tf.layers.dense(
-                    inputs=inputs,
-                    units=self.num_options,
-                    activation=tf.nn.softmax,
-                    kernel_initializer=get_init(model, "W"),
-                    bias_initializer=get_init(model, "b"),
-                    name='policy_over_options'
-                )
-
             elif name == 'q_values_options':
                 layer = tf.layers.dense(
                     inputs=inputs,
@@ -144,6 +134,10 @@ class Model():
 
         return layer
 
+    def setup_tensorflow(self, sess, writer):
+        self.sess = sess
+        self.writer = writer
+
     def __init__(self, model_in, scope, args, trainer, input_size=None, rng=1234, dnn_type=False, num_options=4, num_actions=3):
         """
         example model:
@@ -153,8 +147,11 @@ class Model():
                  {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
         """
 
+        self.reset_storing()
+
         with tf.variable_scope(scope):
             tf.set_random_seed(rng)
+            self.rng = np.random.RandomState(rng + int(scope[-1])) # Should every single one get same seed?
 
             self.args = args
             self.num_options = num_options
@@ -173,7 +170,7 @@ class Model():
             self.out_size = model_in[-3]["out_size"]
             self.dnn_type = dnn_type
 
-            # Build Nain NN
+            # Build Main NN
             for i, m in enumerate(model):
                 if m["model_type"] == 'option' or m["model_type"] == 'value':
                     break
@@ -193,7 +190,6 @@ class Model():
             
             # Build Option Related End Networks 
             self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
-            self.policy_over_options = self.create_layer(input_tensor, m, dnn_type, name='policy_over_options')
             self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
 
             self.intra_options_q_vals = list()
@@ -221,17 +217,13 @@ class Model():
                 self.disconnected_option_q_vals = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
                 self.terminations = tf.gather_nd(params=self.termination_fn, indices=self.responsible_options)
                 
-                self.action_values = tf.gather_nd(params=self.intra_options_q_vals, indices=self.responsible_options) # TODO: Check                
-                print('Action: {}\n, RespActions: {}\n, RespOptions: {}'.format(self.action_values.shape, self.responsible_actions.shape , self.responsible_options.shape))
-
+                self.action_values = tf.gather_nd(params=self.intra_options_q_vals, indices=self.responsible_options)
                 self.action_values = tf.gather_nd(params=self.action_values, indices=self.responsible_actions)
-                print('Action Mod: {}'.format(self.action_values.shape))
 
                 self.value = tf.reduce_max(self.q_values_options) * (1 - self.args.option_eps) + (self.args.option_eps * tf.reduce_mean(self.q_values_options))
                 self.disconnected_value = tf.stop_gradient(self.value)
 
-                # Loss functions 
-
+                # Losses
                 self.value_loss = 0.5 * tf.reduce_sum(self.args.critic_coef * tf.square(self.targets - tf.reshape(self.value_fn, [-1])))
                 self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.raw_rewards - self.disconnected_option_q_vals))
                 self.termination_gradient = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.args.delib) )
@@ -254,16 +246,68 @@ class Model():
 
                 self.summary_op = tf.summary.merge(self.summary)
 
-    def save_params(self):
-        return [i.get_value() for i in self.params]
 
-    def load_params(self, values):
-        print("LOADING NNET..")
+    def get_policy_over_options(self, observations):
+        q_values_options = self.sess.run(self.q_values_options, {self.observations: observations})
+        return q_values_options.argmax() if self.rng.rand() > self.args.option_eps else self.rng.randint(self.num_options)
 
-        for p, value in zip(self.params, values):
-            p.set_value(value.astype("float32"))
 
-        print("LOADED")
+    def get_action(self, observations, current_option):
+        actions = self.sess.run(self.intra_options_q_vals[current_option], {self.observations: observations})
+        return self.rng.choice(range(self.num_actions), p=actions)
+
+
+    def get_termination(self, observations, current_option):
+        termination_prob = self.sess.run(self.termination_fn, {self.observations: observations})
+        return termination_prob[current_option] > self.rng.rand()
+
+
+    def reset_storing(self):
+        self.a_seq = np.zeros((self.args.max_update_freq,), dtype="int32")
+        self.o_seq = np.zeros((self.args.max_update_freq,), dtype="int32")
+        self.r_seq = np.zeros((self.args.max_update_freq,), dtype="float32")
+        self.x_seq = np.zeros((self.args.max_update_freq, self.args.concat_frames*(1 if self.args.grayscale else 3),84,84),dtype="float32")
+        self.t_counter = 0
+
+    # TODO: Start here - November 8th Work Session
+    def store(self, x, new_x, action, raw_reward, done, death):
+        end_ep = done or (death and self.args.death_ends_episode)
+        self.frame_counter += 1
+
+        self.total_reward += raw_reward
+        reward = np.clip(raw_reward, -1, 1)
+
+        self.x_seq[self.t_counter] = np.copy(x)
+        self.o_seq[self.t_counter] = np.copy(self.current_o)
+        self.a_seq[self.t_counter] = np.copy(action)
+        self.r_seq[self.t_counter] = np.copy(float(reward)) - (float(self.terminated)*self.delib*float(self.frame_counter > 1))
+
+        # Where is best place to get the state?
+        self.terminated = self.get_termination()
+        self.termination_counter += self.terminated
+
+        self.t_counter += 1
+
+        # do n-step return to option termination. 
+        # cut off at self.args.max_update_freq
+        # min steps: self.args.update_freq (usually 5 like a3c)
+        # this doesn't make option length a minimum of 5 (they can still terminate). only batch size
+        option_term = (self.terminated and self.t_counter >= self.args.update_freq)
+        if self.t_counter == self.args.max_update_freq or end_ep or option_term: # Time to update
+            d = (self.delib*float(self.frame_counter > 1)) # add delib if termination because it isn't part of V
+            V = self.get_V([self.current_s])[0]-d if self.terminated else self.get_q([self.current_s])[0][self.current_o]
+            R = 0 if end_ep else V
+            V = []
+
+            for j in range(self.t_counter-1,-1,-1): # Easy way to reset to 0
+                R = np.float32(self.r_seq[j] + self.args.gamma*R) # discount
+                V.append(R)
+                self.update_weights(self.x_seq[:self.t_counter], self.a_seq[:self.t_counter], V[::-1], 
+                self.o_seq[:self.t_counter], self.t_counter, self.delib+self.args.margin_cost)
+                self.reset_storing()
+
+        if not end_ep:
+            self.update_internal_state(new_x)
 
 if __name__ == '__main__':
     model = [
@@ -276,6 +320,7 @@ if __name__ == '__main__':
         {"model_type": "value"}
     ]
 
+    # Hack; TODO: Add Argparser
     args = type('', (), {})()
 
     args.option_eps = 0.01
@@ -292,7 +337,8 @@ if __name__ == '__main__':
         l_init_op = tf.local_variables_initializer()
 
         writer = tf.summary.FileWriter('log', sess.graph)
-        
+        m.setup_tensorflow(sess, writer)
+
         sess.run(init_op)
         sess.run(l_init_op)
 
