@@ -25,10 +25,6 @@ class AOC_Tensorflow():
 
         self.model = Model(model)  
 
-        self.Y = tf.placeholder(dtype=tf.float32, shape=[None])
-        self.A = tf.placeholder(dtype=tf.int32, shape=[None])
-        self.O = tf.placeholder(dtype=tf.int32, shape=[None])      
-
 
     def get_new_action_in_option(self):
         self.current_option_policy = self.model.intra_options[self.current_option]
@@ -37,11 +33,11 @@ class AOC_Tensorflow():
                 else self.rng.randint(self.args.num_actions)
 
 
-    def train(self, x, new_x, action, raw_reward, done, death):
+    def store(self, x, new_x, action, raw_reward, done, death):
         end_ep = done or (death and self.args.death_ends_episode)
         self.frame_counter += 1
         
-        self.total_reward += raw_reward
+        self.total_rewards += raw_reward
         reward = np.clip(raw_reward, -1, 1)
 
         self.x_seq[self.t_counter] = np.copy(x)
@@ -49,28 +45,28 @@ class AOC_Tensorflow():
         self.a_seq[self.t_counter] = np.copy(action)
         self.r_seq[self.t_counter] = np.copy(float(reward)) - (float(self.terminated)*self.delib*float(self.frame_counter > 1))
 
-        # self.terminated = self.get_termination([self.current_s])[0][self.current_o] > self.rng.rand()
-        # self.termination_counter += self.terminated
-
+        self.terminated = self.model.terminations[self.current_o] > self.rng.rand()
+        self.termination_counter += self.terminated
         self.t_counter += 1
 
-        option_terminated = (self.terminated and self.t_counter >= self.args.update_freq)
+        option_term = (self.terminated and self.t_counter >= self.args.update_freq)
 
-        if self.t_counter == self.args.max_update_freq or end_ep or option_term: # Time to update
-            d = (self.delib*float(self.frame_counter > 1))
-            value = self.value
-            reward = 0 if end_ep else value
-            values = []
+        if self.t_counter == self.args.max_update_freq or end_ep or option_term:
+            d = (self.delib * float(self.frame_counter > 1))
+            V = self.value if self.terminated else self.q_values_options
+            R = 0 if end_ep else V
+            V = []
 
+            for j in range(self.t_counter-1, -1, -1):
+                R = np.float32(self.r_seq[j] + self.args.gamma * R) # Discount
+                V.append(R)
 
-        if self.terminated: # TODO: Where to do this?
-            self.current_option = np.argmax(self.model.policy_over_options) \
-                if self.rng.rand() > self.args.option_epsilon \
-                else self.rng.randint(self.args.num_options)
+            # TODO: Update weights?
 
-        
+            self.reset_storing()
 
-
+        if not end_ep:
+            self.update_internal_state(new_x)
 
 
     def reset_storing(self):
@@ -79,3 +75,21 @@ class AOC_Tensorflow():
         self.r_seq = np.zeros((self.args.max_update_freq,), dtype="float32")
         self.x_seq = np.zeros((self.args.max_update_freq, self.args.concat_frames*(1 if self.args.grayscale else 3),84,84),dtype="float32")
         self.t_counter = 0
+
+
+    def update_internal_state(self, x):
+        self.current_s = x # TODO ?
+        self.delib = self.args.delib_cost
+
+        if self.terminated:
+            self.current_o = self.model.policy_over_options # TODO: Eps
+            self.o_tracker_chosen[self.current_o] += 1
+
+        self.o_tracker_steps[self.current_o] += 1
+
+    def get_action(self, x):
+        p = self.get_policy([self.current_s], [self.current_o])
+        return self.rng.choice(range(self.num_actions), p=p[-1])
+
+    def get_policy_over_options(self, s):
+        return self.get_q(s)[0].argmax() if self.rng.rand() > self.args.option_epsilon else self.rng.randint(self.args.num_options)

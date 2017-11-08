@@ -88,7 +88,6 @@ class Model():
 
 
         elif model["model_type"] == "value":
-            print("HELLo")
             layer = tf.layers.dense(
                 inputs=inputs,
                 units=1,
@@ -206,34 +205,42 @@ class Model():
             print("Building worker specific operations.")
 
             self.actions = tf.placeholder(shape=[None], dtype=tf.int32)
-            self.actions_onehot = tf.one_hot(self.actions, self.num_actions, dtype=tf.float32)
-
             self.options = tf.placeholder(shape=[None], dtype=tf.int32)
-            self.options_onehot = tf.one_hot(self.options, self.num_options, dtype=tf.float32)
+            self.raw_rewards = tf.placeholder(shape=[None], dytpe=tf.float32)
+
+            self.batch_size = np.arange(actions.shape[0])
 
             # TODO: self.deliberation_cost = tf.placeholder()
 
+            # TODO: Check shapes and gather ops - tf.eager?
             self.targets = tf.placeholder(shape=[None], dtype=tf.float32)
             self.advantages = tf.placeholder(shape=[None], dtype=tf.float32)
 
-            self.responsible_actions = tf.reduce_sum(self.actions_onehot * self.intra_options_q_vals)
-            self.responsible_options = tf.reduce_sum(self.options_onehot * self.policy_over_options)
-            self.responsible_termination = tf.reduce_sum(self.options_onehot * self.termination_fn)
+            self.responsible_options = tf.stack([self.batch_size, self.options], axis=1)
+            self.responsible_actions = tf.stack([self.batch_size, self.options, self.actions], axis=1)
+            self.responsible_termination = tf.stack([self.batch_size, self.termination_fn], axis=1)
 
             self.disconnected_q_vals = tf.stop_gradient(self.q_values_options)
-            self.option_q_vals = tf.gather(params=q_values_options, indices=tf.argmax(self.options_onehot)) # Extract q values for each option
-            self.disconnected_option_q_vals = tf.gather(params=disconnected_q_vals, indices=tf.argmax(self.options_onehot)) # Extract q values for each option
+            self.option_q_vals = tf.gather_nd(params=q_values_options, indices=responsible_options) # Extract q values for each option
+            self.disconnected_option_q_vals = tf.gather_nd(params=disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
+            self.terminations = tf.gather_nd(params=self.termination_fn, indices=responsible_termination)
+          
+            self.relevant_networks = tf.gather(params=self.intra_options_q_vals, indices=self.responsible_options) # Gather the relevant option networks for each
 
-            self.terminations = tf.gather(params=self.termination_fn, indices=tf.argmax(self.options_onehot))
+            self.relevant_networks = tf.stack([self.batch_size, self.relevant_networks], axis=1)
+            self.action_values = tf.gather_nd(params=self.relevant_networks, indices=self.responsible_actions)
 
             self.value = tf.max(self.q_values_options) * (1 - self.args.option_eps) + (self.args.option_eps * tf.mean(self.q_values_options))
             self.disconnected_value = tf.stop_gradient(self.value)
 
-            # Loss functions -- TODO
+            # Loss functions 
+
             self.value_loss = 0.5 * tf.reduce_sum(self.args.critic_coef * tf.square(self.targets - tf.reshape(self.value_fn, [-1])))
+            self.policy_loss = -1 * tf.reduce_sum(tf.log(self.responsible_actions)*(self.raw_rewards - self.disconnected_option_q_vals))
             self.termination_gradient = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.delib) )
-            self.entropy = -1 * tf.reduce_sum(self.q_values_options*tf.log(self.q_values_options))
-            self.policy_loss = -1 * tf.reduce_sum(tf.log(self.responsible_actions)*self.advantages)
+            self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
+            
+            
             self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_gradient
 
             # local_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope)
