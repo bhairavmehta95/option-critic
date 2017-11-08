@@ -161,6 +161,8 @@ class Model():
             self.num_actions = num_actions
             self.observations = tf.placeholder(shape=[None, 84, 84, 4], dtype=tf.float32)
 
+            self.summary = []
+
             input_tensor = self.observations
 
             print("Building following model...")
@@ -220,7 +222,10 @@ class Model():
                 self.terminations = tf.gather_nd(params=self.termination_fn, indices=self.responsible_options)
                 
                 self.action_values = tf.gather_nd(params=self.intra_options_q_vals, indices=self.responsible_options) # TODO: Check                
+                print('Action: {}\n, RespActions: {}\n, RespOptions: {}'.format(self.action_values.shape, self.responsible_actions.shape , self.responsible_options.shape))
+
                 self.action_values = tf.gather_nd(params=self.action_values, indices=self.responsible_actions)
+                print('Action Mod: {}'.format(self.action_values.shape))
 
                 self.value = tf.reduce_max(self.q_values_options) * (1 - self.args.option_eps) + (self.args.option_eps * tf.reduce_mean(self.q_values_options))
                 self.disconnected_value = tf.stop_gradient(self.value)
@@ -232,9 +237,13 @@ class Model():
                 self.termination_gradient = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.args.delib) )
                 self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
                 
-                
                 self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_gradient
 
+                self.summary.append(tf.summary.scalar('policy_loss', self.policy_loss))
+                self.summary.append(tf.summary.scalar('value_loss', self.value_loss))
+                self.summary.append(tf.summary.scalar('termination_gradient', self.termination_gradient))
+                self.summary.append(tf.summary.scalar('entropy', self.entropy))
+                
                 local_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope)
                 self.gradients = tf.gradients(self.loss, local_vars)
                 self.var_norms = tf.global_norm(local_vars)
@@ -242,6 +251,8 @@ class Model():
                 grads, self.grad_norms = tf.clip_by_global_norm(self.gradients, 40.0)
                 global_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'global')
                 self.apply_grads = trainer.apply_gradients(zip(grads,global_vars))
+
+                self.summary_op = tf.summary.merge(self.summary)
 
     def save_params(self):
         return [i.get_value() for i in self.params]
@@ -281,24 +292,26 @@ if __name__ == '__main__':
         l_init_op = tf.local_variables_initializer()
 
         writer = tf.summary.FileWriter('log', sess.graph)
-
-        obs = np.zeros([1, 84, 84, 4])
-        actions = [1]
-        options = [1]
-        raw_rewards = [0.5]
-        targets = [0.8]
-
-        feed_dict = {
-            m.observations : obs,
-            m.actions: actions,
-            m.options: options,
-            m.raw_rewards: raw_rewards,
-            m.targets: targets
-        }
-
+        
         sess.run(init_op)
         sess.run(l_init_op)
 
-        init_ops = [m.grad_norms]
-        summary = sess.run(init_ops, feed_dict=feed_dict)
-        writer.add_summary(summary)
+
+        while True: 
+            obs = np.random.rand(4, 84, 84, 4)
+            actions = np.random.randint(3, size=4)
+            options = np.random.randint(4, size=4)
+            raw_rewards = np.random.random(size=4)
+            targets = np.random.random(size=4)
+
+            feed_dict = {
+                m.observations : obs,
+                m.actions: actions,
+                m.options: options,
+                m.raw_rewards: raw_rewards,
+                m.targets: targets
+            }
+
+            init_ops = [m.grad_norms, m.summary_op]
+            _, summary = sess.run(init_ops, feed_dict=feed_dict)
+            writer.add_summary(summary)
