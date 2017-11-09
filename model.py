@@ -147,13 +147,13 @@ class Model():
                  {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
         """
 
+        self.args = args
         self.reset_storing()
 
         with tf.variable_scope(scope):
             tf.set_random_seed(rng)
-            self.rng = np.random.RandomState(rng + int(scope[-1])) # Should every single one get same seed?
+            self.rng = np.random.RandomState(rng + 1) # Should every single one get same seed?
 
-            self.args = args
             self.num_options = num_options
             self.num_actions = num_actions
             self.observations = tf.placeholder(shape=[None, 84, 84, 4], dtype=tf.float32)
@@ -204,7 +204,6 @@ class Model():
 
                 self.actions = tf.placeholder(shape=[None], dtype=tf.int32)
                 self.options = tf.placeholder(shape=[None], dtype=tf.int32)
-                self.raw_rewards = tf.placeholder(shape=[None], dtype=tf.float32)
                 self.targets = tf.placeholder(shape=[None], dtype=tf.float32)
 
                 self.batch_size = tf.range(tf.shape(self.actions)[0])
@@ -212,30 +211,36 @@ class Model():
                 self.responsible_options = tf.stack([self.batch_size, self.options], axis=1)
                 self.responsible_actions = tf.stack([self.batch_size, self.actions], axis=1)
 
-                self.disconnected_q_vals = tf.stop_gradient(self.q_values_options)
                 self.option_q_vals = tf.gather_nd(params=self.q_values_options, indices=self.responsible_options) # Extract q values for each option
+                
+                self.disconnected_q_vals = tf.stop_gradient(self.q_values_options)
                 self.disconnected_option_q_vals = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
+                
                 self.terminations = tf.gather_nd(params=self.termination_fn, indices=self.responsible_options)
                 
                 self.action_values = tf.gather_nd(params=self.intra_options_q_vals, indices=self.responsible_options)
                 self.action_values = tf.gather_nd(params=self.action_values, indices=self.responsible_actions)
 
-                self.value = tf.reduce_max(self.q_values_options) * (1 - self.args.option_eps) + (self.args.option_eps * tf.reduce_mean(self.q_values_options))
+                # TODO: Check axis?
+                self.value = tf.reduce_max(self.q_values_options, axis=1) * (1 - self.args.option_eps) + (self.args.option_eps * tf.reduce_mean(self.q_values_options, axis=1))
                 self.disconnected_value = tf.stop_gradient(self.value)
 
                 # Losses
-                self.value_loss = 0.5 * tf.reduce_sum(self.args.critic_coef * tf.square(self.targets - tf.reshape(self.value_fn, [-1])))
-                self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.raw_rewards - self.disconnected_option_q_vals))
-                self.termination_gradient = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.args.delib) )
-                self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
+                self.value_loss = 0.5 * tf.reduce_mean(self.args.critic_coef * tf.square(self.targets - self.option_q_vals))
+                self.policy_loss = -1 * tf.reduce_mean((tf.log(self.action_values) + self.args.log_eps) * (self.targets - self.disconnected_option_q_vals))
+                self.termination_gradient_loss = tf.reduce_mean(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.args.delib))
                 
-                self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_gradient
+                # TODO: Sum over all actions, not just action_values  ; -/+ 1
+                self.entropy = -1 * tf.reduce_mean(self.action_values*tf.log(self.action_values + self.args.log_eps))
+                
+                self.loss = self.policy_loss - self.entropy - self.value_loss - self.termination_gradient_loss
 
                 self.summary.append(tf.summary.scalar('policy_loss', self.policy_loss))
                 self.summary.append(tf.summary.scalar('value_loss', self.value_loss))
-                self.summary.append(tf.summary.scalar('termination_gradient', self.termination_gradient))
+                self.summary.append(tf.summary.scalar('termination_gradient', self.termination_gradient_loss))
                 self.summary.append(tf.summary.scalar('entropy', self.entropy))
                 
+                # Move to A2C Variant
                 local_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope)
                 self.gradients = tf.gradients(self.loss, local_vars)
                 self.var_norms = tf.global_norm(local_vars)
@@ -326,6 +331,10 @@ if __name__ == '__main__':
     args.option_eps = 0.01
     args.critic_coef = 0.01
     args.delib = 0.001
+    args.max_update_freq = 20
+    args.concat_frames = 1
+    args.grayscale = 1
+    args.log_eps = 0.01
 
     trainer = tf.train.RMSPropOptimizer(learning_rate=0.001)
     m_global = Model(model, scope='global', trainer=trainer, args=args)
@@ -347,14 +356,12 @@ if __name__ == '__main__':
             obs = np.random.rand(4, 84, 84, 4)
             actions = np.random.randint(3, size=4)
             options = np.random.randint(4, size=4)
-            raw_rewards = np.random.random(size=4)
             targets = np.random.random(size=4)
 
             feed_dict = {
                 m.observations : obs,
                 m.actions: actions,
                 m.options: options,
-                m.raw_rewards: raw_rewards,
                 m.targets: targets
             }
 
