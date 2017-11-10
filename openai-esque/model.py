@@ -4,10 +4,13 @@ import math, csv, time, sys, os, pdb, copy
 
 from build_nn import Network
 
+from baselines.common import set_global_seeds, explained_variance
+from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
+from baselines.common.atari_wrappers import wrap_deepmind
 from baselines.a2c.utils import Scheduler, discount_with_dones
 
 class Model():
-    def __init__(self, policy, ob_space, ac_space, nenvs, nsteps, nstack, num_procs,
+    def __init__(self, model_template, ob_space, ac_space, nenvs, nsteps, nstack, num_procs,
             ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4,
             alpha=0.99, epsilon=1e-5, total_timesteps=int(80e6), lrschedule='linear'):
         """
@@ -30,11 +33,11 @@ class Model():
 
         self.actions = tf.placeholder(shape=[nbatch], dtype=tf.int32)
         self.options = tf.placeholder(shape=[nbatch], dtype=tf.int32)
-        self.raw_rewards = tf.placeholder(shape=[nbatch], dtype=tf.float32)
+        self.rewards = tf.placeholder(shape=[nbatch], dtype=tf.float32)
         self.lr = tf.placeholder(shape=[], dtype=tf.float32)
 
-        self.step_model = policy(sess, ob_space, ac_space, nenvs, 1, nstack, reuse=False)
-        self.train_model = policy(sess, ob_space, ac_space, nenvs, nsteps, nstack, reuse=True)
+        self.step_model = Network(model_template, ob_space, ac_space, nenvs, 1, nstack, reuse=False)
+        self.train_model = Network(model_template, ob_space, ac_space, nenvs, nsteps, nstack, reuse=True)
 
         self.responsible_options = tf.stack([self.batch_size, self.options], axis=1)
         self.responsible_actions = tf.stack([self.batch_size, self.actions], axis=1)
@@ -53,10 +56,12 @@ class Model():
         # Losses
         self.value_loss = 0.5 * tf.reduce_sum(self.args.critic_coef * tf.square(self.targets - tf.reshape(self.value_fn, [-1])))
         self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.raw_rewards - self.disconnected_option_q_vals))
-        self.termination_gradient = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.args.delib) )
+        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.args.delib) )
+        
+        # TODO: Look at entropy!
         self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
 
-        self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_gradient
+        self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_loss
 
         # Gradients
         self.vars = tf.get_collection('model')        
@@ -72,6 +77,124 @@ class Model():
         self.summary.append(tf.summary.scalar('termination_gradient', self.termination_gradient))
         self.summary.append(tf.summary.scalar('entropy', self.entropy))
         self.summary_op = tf.summary.merge(self.summary)
+
+        lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
+
+        def train(obs, options, actions, rewards):
+            feed_dict = {
+                m.observations : obs,
+                m.actions: actions,
+                m.options: options,
+                m.rewards: rewards,
+            }
+
+            init_ops = [m.grad_norms, m.summary_op]
+            _, summary = sess.run(init_ops, feed_dict=feed_dict)
+
+        return summary
+
+        self.train = train
+        self.train_model = train_model
+        self.step_model = step_model
+        # self.step = step_model.step
+        # self.value = step_model.value
+        self.initial_state = step_model.initial_state
+
+        tf.global_variables_initializer().run(session=sess)
+
+class Runner(object):
+
+    def __init__(self, env, model, nsteps=5, nstack=4, gamma=0.99):
+        self.env = env
+        self.model = model
+        nh, nw, nc = env.observation_space.shape
+        nenv = env.num_envs
+        self.batch_ob_shape = (nenv*nsteps, nh, nw, nc*nstack)
+        self.obs = np.zeros((nenv, nh, nw, nc*nstack), dtype=np.uint8)
+        self.nc = nc
+        obs = env.reset()
+        self.update_obs(obs)
+        self.gamma = gamma
+        self.nsteps = nsteps
+        self.states = model.initial_state
+        self.dones = [False for _ in range(nenv)]
+
+    def update_obs(self, obs):
+        # Do frame-stacking here instead of the FrameStack wrapper to reduce
+        # IPC overhead
+        self.obs = np.roll(self.obs, shift=-self.nc, axis=3)
+        self.obs[:, :, :, -self.nc:] = obs
+
+    def run(self):
+        mb_obs, mb_options, mb_rewards, mb_actions, mb_values, mb_dones = [],[],[],[],[],[]
+
+        for n in range(self.nsteps):
+            actions, values = self.model.step(self.obs)
+
+            mb_obs.append(np.copy(self.obs))
+            mb_options.append(np.copy(self.options))
+            mb_actions.append(actions)
+            mb_values.append(values)
+            mb_dones.append(self.dones)
+
+            obs, rewards, dones, _ = self.env.step(actions)
+            self.dones = dones
+
+            for n, done in enumerate(dones):
+                if done:
+                    self.obs[n] = self.obs[n]*0
+
+            self.update_obs(obs)
+            mb_rewards.append(rewards)
+
+        mb_dones.append(self.dones)
+
+        #batch of steps to batch of rollouts
+        mb_obs = np.asarray(mb_obs, dtype=np.uint8).swapaxes(1, 0).reshape(self.batch_ob_shape)
+        mb_rewards = np.asarray(mb_rewards, dtype=np.float32).swapaxes(1, 0)
+        mb_actions = np.asarray(mb_actions, dtype=np.int32).swapaxes(1, 0)
+        mb_options = np.asarray(mb_options, dtype=np.int32).swapaxes(1, 0)
+        mb_values = np.asarray(mb_values, dtype=np.float32).swapaxes(1, 0)
+        mb_dones = np.asarray(mb_dones, dtype=np.bool).swapaxes(1, 0)
+
+        mb_dones = mb_dones[:, 1:]
+        last_values = self.model.value(self.obs).tolist()
+        
+        #discount/bootstrap off value fn
+        for n, (rewards, dones, value) in enumerate(zip(mb_rewards, mb_dones, last_values)):
+            rewards = rewards.tolist()
+            dones = dones.tolist()
+            if dones[-1] == 0:
+                rewards = discount_with_dones(rewards+[value], dones+[0], self.gamma)[:-1]
+            else:
+                rewards = discount_with_dones(rewards, dones, self.gamma)
+            mb_rewards[n] = rewards
+
+        mb_rewards = mb_rewards.flatten()
+        mb_actions = mb_actions.flatten()
+        mb_options = mb_options.flatten()
+        mb_values = mb_values.flatten()
+
+        return mb_obs, mb_options, mb_rewards, mb_masks, mb_actions, mb_values
+
+def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), vf_coef=0.5, ent_coef=0.01, max_grad_norm=0.5, lr=7e-4, lrschedule='linear', epsilon=1e-5, alpha=0.99, gamma=0.99, log_interval=100):
+    tf.reset_default_graph()
+    set_global_seeds(seed)
+
+    nenvs = env.num_envs
+    ob_space = env.observation_space
+    ac_space = env.action_space
+    num_procs = len(env.remotes) # HACK
+    model = Model(model_template=model_template, ob_space=ob_space, ac_space=ac_space, nenvs=nenvs, nsteps=nsteps, nstack=nstack, num_procs=num_procs, ent_coef=ent_coef, vf_coef=vf_coef,
+        max_grad_norm=max_grad_norm, lr=lr, alpha=alpha, epsilon=epsilon, total_timesteps=total_timesteps, lrschedule=lrschedule)
+    runner = Runner(env, model, nsteps=nsteps, nstack=nstack, gamma=gamma)
+
+    nbatch = nenvs*nsteps
+    tstart = time.time()
+    for update in range(1, total_timesteps//nbatch+1):
+        obs, options, rewards, masks, actions, values = runner.run()
+        policy_loss, value_loss, policy_entropy = model.train(obs, options, rewards, actions)
+    env.close()
 
 
 if __name__ == '__main__':

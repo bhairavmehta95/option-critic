@@ -3,7 +3,7 @@ from baselines.common.atari_wrappers import make_atari, wrap_deepmind
 
 from model import learn
 
-def train(env_id, num_timesteps, seed, policy, lrschedule, num_cpu):
+def train(model_template, env_id, num_timesteps, seed, policy, lrschedule, num_cpu):
     def make_env(rank):
         def _thunk():
             env = make_atari(env_id)
@@ -26,7 +26,7 @@ def train(env_id, num_timesteps, seed, policy, lrschedule, num_cpu):
     parser.add_argument('--gamma',          help='gamma (discounting)',     default=0.99)
     parser.add_argument('--log_interval',   help='log_interval',            default=100)
 
-    learn(env, seed, total_timesteps=int(num_timesteps * 1.1), args=args)
+    learn(model_template, env, seed, total_timesteps=int(num_timesteps * 1.1), args=args)
     env.close()
 
 def main():
@@ -39,7 +39,7 @@ def main():
 
     args = parser.parse_args()
 
-    model = [
+    model_template = [
         {"model_type": "conv", "filter_size": [8,8], "pool": [1,1], "stride": [4,4], "out_size": 32, "name": "conv1"},
         {"model_type": "conv", "filter_size": [4,4], "pool": [1,1], "stride": [2,2], "out_size": 64, "name": "conv2"},
         {"model_type": "conv", "filter_size": [3,3], "pool": [1,1], "stride": [1,1], "out_size": 64, "name": "conv3"},

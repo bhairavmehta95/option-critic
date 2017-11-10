@@ -48,12 +48,75 @@ def get_init(model, t, conv=False):
 
 
 class Network():
-    def __call__(self, *args, **kwargs):
-        return self.apply(*args, **kwargs)
+    def __init__(self, model_in, ob_space, ac_space, nenv, nsteps, nstack, reuse=False):
+        """
+        example model:
+        model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
+                 {"model_type": "conv", "filter_size": [7,7], "pool": [1,1], "stride": [1,1], "out_size": 15},
+                 {"model_type": "mlp", "out_size": 300, "activation": "tanh"},
+                 {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
+        """
+
+        self.args = args
+        self.reset_storing()
+
+        with tf.variable_scope("model", reuse=reuse):
+            self.nbatches = nenvs * nsteps
+            self.nh, nw, nc = ob_space.shape
+            self.ob_shape = (nbatch, nh, nw, nc*nstack)
+            self.nact = ac_space.n
+            self.nopt = nopt
+
+            self.observations = tf.placeholder(shape=self.ob_shape, dtype=tf.uint8)
+
+            self.summary = []
+
+            input_tensor = self.observations
+
+            print("Building following model...")
+            print(model)
+
+            self.model = model
+            self.input_size = input_size
+            self.out_size = model_in[-3]["out_size"]
+            self.dnn_type = dnn_type
+
+            # Build Main NN
+            for i, m in enumerate(model):
+                if m["model_type"] == 'option' or m["model_type"] == 'value':
+                    break
+
+                new_layer = self.create_layer(input_tensor, m, dnn_type=dnn_type)
+                input_tensor = new_layer
+
+            self.state_representation = input_tensor
+
+            m = dict()
+            m["model_type"] = 'value'
+
+            self.value_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='value')
+
+            m = dict()
+            m["model_type"] = 'option'
+            
+            # Build Option Related End Networks 
+            self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
+            self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
+
+            self.intra_options_q_vals = list()
+            for i in range(self.nopt):
+                intra_option = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='intra_option_{}'.format(i))
+                self.intra_options_q_vals.append(intra_option)
+
+            self.initial_state = [] # For reproducability with OpenAI code
+            
+            print("Build complete.")
+
 
     def get_activation(self, model):
         activation = model["activation"] if "activation" in model else "linear"
         return get_activation(activation)
+
 
     def create_layer(self, inputs, model, dnn_type=True, name=None):
         layer = None
@@ -141,8 +204,13 @@ class Network():
 
 
     def get_policy_over_options(self, observations):
-        q_values_options = self.sess.run(self.q_values_options, {self.observations: observations})
-        return q_values_options.argmax() if self.rng.rand() > self.args.option_eps else self.rng.randint(self.nopt)
+        q_values_options, value = self.sess.run(self.q_values_options, self.value_fn, feed_dict={self.observations: observations})
+        return q_values_options.argmax() if self.rng.rand() > self.args.option_eps else self.rng.randint(self.nopt), value
+
+
+    def value(step, observations):
+        value = self.sess.run(self.value_fn, feed_dict={self.observations: observations})
+        return value
 
 
     def step(self, observations, current_option):
@@ -155,66 +223,3 @@ class Network():
         return termination_prob[current_option] > self.rng.rand()
 
 
-
-    def __init__(self, model_in, ob_space, ac_space, nenv, nsteps, nstack, reuse=False):
-        """
-        example model:
-        model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
-                 {"model_type": "conv", "filter_size": [7,7], "pool": [1,1], "stride": [1,1], "out_size": 15},
-                 {"model_type": "mlp", "out_size": 300, "activation": "tanh"},
-                 {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
-        """
-
-        self.args = args
-        self.reset_storing()
-
-        with tf.variable_scope("model", reuse=reuse):
-            self.nbatches = nenvs * nsteps
-            self.nh, nw, nc = ob_space.shape
-            self.ob_shape = (nbatch, nh, nw, nc*nstack)
-            self.nact = ac_space.n
-            self.nopt = nopt
-
-            # TODO: uint8?
-            self.observations = tf.placeholder(shape=self.ob_shape, dtype=tf.float32)
-
-            self.summary = []
-
-            input_tensor = self.observations
-
-            print("Building following model...")
-            print(model)
-
-            self.model = model
-            self.input_size = input_size
-            self.out_size = model_in[-3]["out_size"]
-            self.dnn_type = dnn_type
-
-            # Build Main NN
-            for i, m in enumerate(model):
-                if m["model_type"] == 'option' or m["model_type"] == 'value':
-                    break
-
-                new_layer = self.create_layer(input_tensor, m, dnn_type=dnn_type)
-                input_tensor = new_layer
-
-            self.state_representation = input_tensor
-
-            m = dict()
-            m["model_type"] = 'value'
-
-            self.value_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='value')
-
-            m = dict()
-            m["model_type"] = 'option'
-            
-            # Build Option Related End Networks 
-            self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
-            self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
-
-            self.intra_options_q_vals = list()
-            for i in range(self.nopt):
-                intra_option = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='intra_option_{}'.format(i))
-                self.intra_options_q_vals.append(intra_option)
-
-            print("Build complete.")
