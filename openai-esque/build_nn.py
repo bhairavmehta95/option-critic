@@ -202,6 +202,9 @@ class Network():
     def setup_tensorflow(self, sess, writer):
         self.sess = sess
         self.writer = writer
+        
+        tf.global_variables_initializer().run(session=sess)
+        tf.local_variables_initializer().run(session=sess)
 
 
     def get_policy_over_options(self, observations):

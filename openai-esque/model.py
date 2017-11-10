@@ -49,6 +49,7 @@ class Model():
 
         self.disconnected_q_vals = tf.stop_gradient(self.train_model.q_values_options)
         self.option_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
+
         self.disconnected_option_q_vals = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
         self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
 
@@ -86,6 +87,8 @@ class Model():
         lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
 
         def train(obs, options, actions, rewards):
+            print(sess.run(tf.report_uninitialized_variables()))
+
             feed_dict = {
                 self.train_model.observations : obs,
                 self.actions: actions,
@@ -100,9 +103,7 @@ class Model():
 
         def setup_tensorflow(sess, writer):
             self.step_model.setup_tensorflow(sess, writer)
-            self.train_model.setup_tensorflow(sess, writer)
-            tf.local_variables_initializer().run(session=sess)
-            tf.global_variables_initializer().run(session=sess)
+            self.train_model.setup_tensorflow(sess, writer)            
 
         self.train = train
         self.setup_tensorflow = setup_tensorflow
@@ -110,6 +111,8 @@ class Model():
         self.initial_state = self.step_model.initial_state
         self.step = self.step_model.step
         self.value = self.step_model.value
+
+        tf.global_variables_initializer().run(session=sess)
 
 
 class Runner(object):
@@ -225,7 +228,10 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
     with tf.Session() as sess:
         writer = tf.summary.FileWriter('log', sess.graph)
         model.setup_tensorflow(sess=sess, writer=writer)
-        
+
+        sess.run(tf.global_variables_initializer())
+        sess.run(tf.local_variables_initializer())
+
         for update in range(1, total_timesteps//nbatch+1):
             obs, options, rewards, actions, values = runner.run()
             policy_loss, value_loss, policy_entropy = model.train(obs, options, rewards, actions)
