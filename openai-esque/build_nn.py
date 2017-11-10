@@ -48,7 +48,7 @@ def get_init(model, t, conv=False):
 
 
 class Network():
-    def __init__(self, model_in, ob_space, ac_space, nenv, nsteps, nstack, reuse=False):
+    def __init__(self, model_in, nopt, ob_space, ac_space, nenvs, nsteps, nstack, reuse=False):
         """
         example model:
         model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
@@ -56,33 +56,34 @@ class Network():
                  {"model_type": "mlp", "out_size": 300, "activation": "tanh"},
                  {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
         """
-
-        self.args = args
-        self.reset_storing()
+        # self.reset_storing()
 
         with tf.variable_scope("model", reuse=reuse):
             self.nbatches = nenvs * nsteps
-            self.nh, nw, nc = ob_space.shape
-            self.ob_shape = (nbatch, nh, nw, nc*nstack)
+            self.nh, self.nw, self.nc = ob_space.shape
+            self.ob_shape = (self.nbatches, self.nh, self.nw, self.nc*nstack)
             self.nact = ac_space.n
             self.nopt = nopt
+            self.rng = np.random.RandomState(0) # TODO
 
-            self.observations = tf.placeholder(shape=self.ob_shape, dtype=tf.uint8)
+            # TODO: Uint8
+            self.observations = tf.placeholder(shape=self.ob_shape, dtype=tf.float32)
 
             self.summary = []
 
             input_tensor = self.observations
 
             print("Building following model...")
-            print(model)
+            print(model_in)
 
-            self.model = model
-            self.input_size = input_size
+            self.model = model_in
+            self.input_size = ob_space.shape
             self.out_size = model_in[-3]["out_size"]
-            self.dnn_type = dnn_type
+            
+            dnn_type = True # TODO
 
             # Build Main NN
-            for i, m in enumerate(model):
+            for i, m in enumerate(model_in):
                 if m["model_type"] == 'option' or m["model_type"] == 'value':
                     break
 
@@ -208,14 +209,25 @@ class Network():
         return q_values_options.argmax() if self.rng.rand() > self.args.option_eps else self.rng.randint(self.nopt), value
 
 
-    def value(step, observations):
+    def value(self, observations):
         value = self.sess.run(self.value_fn, feed_dict={self.observations: observations})
         return value
 
 
-    def step(self, observations, current_option):
-        actions = self.sess.run(self.intra_options_q_vals[current_option], {self.observations: observations})
-        return self.rng.choice(range(self.nact), p=actions)
+    # TODO: REMOVE DEFAULT VALUE
+    def step(self, observations, current_option=0):
+        action_probabilities, value = self.sess.run([
+                tf.nn.softmax(self.intra_options_q_vals[current_option], dim=1), 
+                self.value_fn
+            ], 
+            feed_dict={self.observations: observations}
+        )
+
+        act_to_take = []
+        for act_prob in action_probabilities:
+            act_to_take.append(self.rng.choice(range(self.nact), p=act_prob))
+
+        return act_to_take, value
 
 
     def get_termination(self, observations, current_option):

@@ -10,9 +10,9 @@ from baselines.common.atari_wrappers import wrap_deepmind
 from baselines.a2c.utils import Scheduler, discount_with_dones
 
 class Model():
-    def __init__(self, model_template, ob_space, ac_space, nenvs, nsteps, nstack, num_procs,
-            ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4,
-            alpha=0.99, epsilon=1e-5, total_timesteps=int(80e6), lrschedule='linear'):
+    def __init__(self, model_template, num_options, ob_space, ac_space, nenvs, nsteps, nstack, num_procs,
+            ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4, alpha=0.99, epsilon=1e-5, 
+            total_timesteps=int(80e6), lrschedule='linear', option_eps=0.001, delib_cost=0.001):
         """
         example model:
         model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
@@ -28,35 +28,40 @@ class Model():
         sess = tf.Session(config=config)
         nact = ac_space.n
         nbatch = nenvs*nsteps
+        nopt = num_options
 
-        print("Building worker specific operations.")
+        batch_indexer = tf.range(nbatch)
+
+        print("Building rest of the graph.")
 
         self.actions = tf.placeholder(shape=[nbatch], dtype=tf.int32)
         self.options = tf.placeholder(shape=[nbatch], dtype=tf.int32)
         self.rewards = tf.placeholder(shape=[nbatch], dtype=tf.float32)
         self.lr = tf.placeholder(shape=[], dtype=tf.float32)
 
-        self.step_model = Network(model_template, ob_space, ac_space, nenvs, 1, nstack, reuse=False)
-        self.train_model = Network(model_template, ob_space, ac_space, nenvs, nsteps, nstack, reuse=True)
+        self.summary = []
 
-        self.responsible_options = tf.stack([self.batch_size, self.options], axis=1)
-        self.responsible_actions = tf.stack([self.batch_size, self.actions], axis=1)
+        self.step_model = Network(model_template, nopt, ob_space, ac_space, nenvs, 1, nstack, reuse=False)
+        self.train_model = Network(model_template, nopt, ob_space, ac_space, nenvs, nsteps, nstack, reuse=True)
 
-        self.disconnected_q_vals = tf.stop_gradient(self.q_values_options)
-        self.option_q_vals = tf.gather_nd(params=self.q_values_options, indices=self.responsible_options) # Extract q values for each option
+        self.responsible_options = tf.stack([batch_indexer, self.options], axis=1)
+        self.responsible_actions = tf.stack([batch_indexer, self.actions], axis=1)
+
+        self.disconnected_q_vals = tf.stop_gradient(self.train_model.q_values_options)
+        self.option_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
         self.disconnected_option_q_vals = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
-        self.terminations = tf.gather_nd(params=self.termination_fn, indices=self.responsible_options)
+        self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
 
-        self.action_values = tf.gather_nd(params=self.intra_options_q_vals, indices=self.responsible_options)
+        self.action_values = tf.gather_nd(params=self.train_model.intra_options_q_vals, indices=self.responsible_options)
         self.action_values = tf.gather_nd(params=self.action_values, indices=self.responsible_actions)
 
-        self.value = tf.reduce_max(self.q_values_options) * (1 - self.args.option_eps) + (self.args.option_eps * tf.reduce_mean(self.q_values_options))
+        self.value = tf.reduce_max(self.train_model.q_values_options) * (1 - option_eps) + (option_eps * tf.reduce_mean(self.train_model.q_values_options))
         self.disconnected_value = tf.stop_gradient(self.value)
 
         # Losses
-        self.value_loss = 0.5 * tf.reduce_sum(self.args.critic_coef * tf.square(self.targets - tf.reshape(self.value_fn, [-1])))
-        self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.raw_rewards - self.disconnected_option_q_vals))
-        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + self.args.delib) )
+        self.value_loss = 0.5 * tf.reduce_sum(vf_coef * tf.square(self.rewards - tf.reshape(self.train_model.value_fn, [-1])))
+        self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_option_q_vals))
+        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + delib_cost) )
         
         # TODO: Look at entropy!
         self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
@@ -64,17 +69,17 @@ class Model():
         self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_loss
 
         # Gradients
-        self.vars = tf.get_collection('model')        
+        self.vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'model')        
         self.gradients = tf.gradients(self.loss, self.vars)
         grads, self.grad_norms = tf.clip_by_global_norm(self.gradients, max_grad_norm)
         grads = list(zip(grads, self.vars))
-        self.trainer = tf.train.RMSPropOptimizer(learning_rate=LR, decay=alpha, epsilon=epsilon)
+        self.trainer = tf.train.RMSPropOptimizer(learning_rate=lr, decay=alpha, epsilon=epsilon)
         self.apply_grads = self.trainer.apply_gradients(grads)
 
         # Summary
         self.summary.append(tf.summary.scalar('policy_loss', self.policy_loss))
         self.summary.append(tf.summary.scalar('value_loss', self.value_loss))
-        self.summary.append(tf.summary.scalar('termination_gradient', self.termination_gradient))
+        self.summary.append(tf.summary.scalar('termination_loss', self.termination_loss))
         self.summary.append(tf.summary.scalar('entropy', self.entropy))
         self.summary_op = tf.summary.merge(self.summary)
 
@@ -82,25 +87,30 @@ class Model():
 
         def train(obs, options, actions, rewards):
             feed_dict = {
-                m.observations : obs,
-                m.actions: actions,
-                m.options: options,
-                m.rewards: rewards,
+                self.train_model.observations : obs,
+                self.actions: actions,
+                self.options: options,
+                self.rewards: rewards,
             }
 
-            init_ops = [m.grad_norms, m.summary_op]
-            _, summary = sess.run(init_ops, feed_dict=feed_dict)
+            train_ops = [self.grad_norms, self.summary_op]
+            _, summary = sess.run(train_ops, feed_dict=feed_dict)
 
-        return summary
+            return summary
+
+        def setup_tensorflow(sess, writer):
+            self.step_model.setup_tensorflow(sess, writer)
+            self.train_model.setup_tensorflow(sess, writer)
+            tf.local_variables_initializer().run(session=sess)
+            tf.global_variables_initializer().run(session=sess)
 
         self.train = train
-        self.train_model = train_model
-        self.step_model = step_model
-        # self.step = step_model.step
-        # self.value = step_model.value
-        self.initial_state = step_model.initial_state
+        self.setup_tensorflow = setup_tensorflow
 
-        tf.global_variables_initializer().run(session=sess)
+        self.initial_state = self.step_model.initial_state
+        self.step = self.step_model.step
+        self.value = self.step_model.value
+
 
 class Runner(object):
 
@@ -112,6 +122,9 @@ class Runner(object):
         self.batch_ob_shape = (nenv*nsteps, nh, nw, nc*nstack)
         self.obs = np.zeros((nenv, nh, nw, nc*nstack), dtype=np.uint8)
         self.nc = nc
+
+        self.options = np.zeros(nenv) # current options; TODO
+
         obs = env.reset()
         self.update_obs(obs)
         self.gamma = gamma
@@ -159,15 +172,18 @@ class Runner(object):
 
         mb_dones = mb_dones[:, 1:]
         last_values = self.model.value(self.obs).tolist()
-        
+
         #discount/bootstrap off value fn
         for n, (rewards, dones, value) in enumerate(zip(mb_rewards, mb_dones, last_values)):
             rewards = rewards.tolist()
             dones = dones.tolist()
+
             if dones[-1] == 0:
-                rewards = discount_with_dones(rewards+[value], dones+[0], self.gamma)[:-1]
+                # TODO: why isn't bootstrapping working?
+                rewards = discount_with_dones(rewards + [0.0], dones+[0], self.gamma)[:-1]
             else:
                 rewards = discount_with_dones(rewards, dones, self.gamma)
+
             mb_rewards[n] = rewards
 
         mb_rewards = mb_rewards.flatten()
@@ -175,77 +191,43 @@ class Runner(object):
         mb_options = mb_options.flatten()
         mb_values = mb_values.flatten()
 
-        return mb_obs, mb_options, mb_rewards, mb_masks, mb_actions, mb_values
+        return mb_obs, mb_options, mb_rewards, mb_actions, mb_values
 
-def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), vf_coef=0.5, ent_coef=0.01, max_grad_norm=0.5, lr=7e-4, lrschedule='linear', epsilon=1e-5, alpha=0.99, gamma=0.99, log_interval=100):
+def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), args=None):   
+    vf_coef=args.vf_coef
+    ent_coef= args.ent_coef
+    max_grad_norm= args.max_grad_norm
+    lr= args.lr
+    lrschedule= args.lrschedule
+    epsilon= args.epsilon
+    alpha= args.alpha
+    gamma= args.gamma
+    log_interval= args.log_interval
+    delib_cost =args.delib_cost
+
     tf.reset_default_graph()
     set_global_seeds(seed)
 
     nenvs = env.num_envs
     ob_space = env.observation_space
     ac_space = env.action_space
+    num_options = args.nopts
+    option_eps = args.opt_eps
+
     num_procs = len(env.remotes) # HACK
-    model = Model(model_template=model_template, ob_space=ob_space, ac_space=ac_space, nenvs=nenvs, nsteps=nsteps, nstack=nstack, num_procs=num_procs, ent_coef=ent_coef, vf_coef=vf_coef,
-        max_grad_norm=max_grad_norm, lr=lr, alpha=alpha, epsilon=epsilon, total_timesteps=total_timesteps, lrschedule=lrschedule)
+    model = Model(model_template=model_template, num_options=num_options, ob_space=ob_space, ac_space=ac_space, nenvs=nenvs, nsteps=nsteps, nstack=nstack, num_procs=num_procs, ent_coef=ent_coef, vf_coef=vf_coef,
+        max_grad_norm=max_grad_norm, lr=lr, alpha=alpha, epsilon=epsilon, total_timesteps=total_timesteps, lrschedule=lrschedule, option_eps=option_eps, delib_cost=delib_cost)
     runner = Runner(env, model, nsteps=nsteps, nstack=nstack, gamma=gamma)
 
     nbatch = nenvs*nsteps
     tstart = time.time()
-    for update in range(1, total_timesteps//nbatch+1):
-        obs, options, rewards, masks, actions, values = runner.run()
-        policy_loss, value_loss, policy_entropy = model.train(obs, options, rewards, actions)
-    env.close()
-
-
-if __name__ == '__main__':
-    model = [
-        {"model_type": "conv", "filter_size": [8,8], "pool": [1,1], "stride": [4,4], "out_size": 32, "name": "conv1"},
-        {"model_type": "conv", "filter_size": [4,4], "pool": [1,1], "stride": [2,2], "out_size": 64, "name": "conv2"},
-        {"model_type": "conv", "filter_size": [3,3], "pool": [1,1], "stride": [1,1], "out_size": 64, "name": "conv3"},
-        {"model_type": "flatten"},
-        {"model_type": "mlp", "out_size": 512, "activation": "relu", "name": "fc1"},
-        {"model_type": "option"},
-        {"model_type": "value"}
-    ]
-
-    # Hack; TODO: Add Argparser
-    args = type('', (), {})()
-
-    args.option_eps = 0.01
-    args.critic_coef = 0.01
-    args.delib = 0.001
-
-    trainer = tf.train.RMSPropOptimizer(learning_rate=0.001)
-    m_global = Model(model, scope='global', trainer=trainer, args=args)
-    m = Model(model, scope='worker_1', trainer=trainer, args=args)
 
     with tf.Session() as sess:
-
-        init_op = tf.global_variables_initializer()
-        l_init_op = tf.local_variables_initializer()
-
         writer = tf.summary.FileWriter('log', sess.graph)
-        m.setup_tensorflow(sess, writer)
+        model.setup_tensorflow(sess=sess, writer=writer)
+        
+        for update in range(1, total_timesteps//nbatch+1):
+            obs, options, rewards, actions, values = runner.run()
+            policy_loss, value_loss, policy_entropy = model.train(obs, options, rewards, actions)
 
-        sess.run(init_op)
-        sess.run(l_init_op)
-
-
-        while True: 
-            obs = np.random.rand(4, 84, 84, 4)
-            actions = np.random.randint(3, size=4)
-            options = np.random.randint(4, size=4)
-            raw_rewards = np.random.random(size=4)
-            targets = np.random.random(size=4)
-
-            feed_dict = {
-                m.observations : obs,
-                m.actions: actions,
-                m.options: options,
-                m.raw_rewards: raw_rewards,
-                m.targets: targets
-            }
-
-            init_ops = [m.grad_norms, m.summary_op]
-            _, summary = sess.run(init_ops, feed_dict=feed_dict)
-            writer.add_summary(summary)
+    env.close()
