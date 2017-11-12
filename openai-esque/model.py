@@ -13,13 +13,7 @@ class Model():
     def __init__(self, model_template, num_options, ob_space, ac_space, nenvs, nsteps, nstack, num_procs,
             ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4, alpha=0.99, epsilon=1e-5, 
             total_timesteps=int(80e6), lrschedule='linear', option_eps=0.001, delib_cost=0.001):
-        """
-        example model:
-        model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
-                 {"model_type": "conv", "filter_size": [7,7], "pool": [1,1], "stride": [1,1], "out_size": 15},
-                 {"model_type": "mlp", "out_size": 300, "activation": "tanh"},
-                 {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
-        """
+
         config = tf.ConfigProto(allow_soft_placement=True,
             intra_op_parallelism_threads=num_procs,
             inter_op_parallelism_threads=num_procs)
@@ -145,6 +139,7 @@ class Runner(object):
         mb_obs, mb_options, mb_rewards, mb_actions, mb_values, mb_dones = [],[],[],[],[],[]
 
         for n in range(self.nsteps):
+            # TODO: Put option picking stuff here!
             actions, values = self.model.step(self.obs)
 
             mb_obs.append(np.copy(self.obs))
@@ -154,6 +149,7 @@ class Runner(object):
             mb_dones.append(self.dones)
 
             obs, rewards, dones, _ = self.env.step(actions)
+
             self.dones = dones
 
             for n, done in enumerate(dones):
@@ -197,25 +193,26 @@ class Runner(object):
         return mb_obs, mb_options, mb_rewards, mb_actions, mb_values
 
 def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), args=None):   
-    vf_coef=args.vf_coef
-    ent_coef= args.ent_coef
-    max_grad_norm= args.max_grad_norm
-    lr= args.lr
-    lrschedule= args.lrschedule
-    epsilon= args.epsilon
-    alpha= args.alpha
-    gamma= args.gamma
-    log_interval= args.log_interval
-    delib_cost =args.delib_cost
+    vf_coef = args.vf_coef
+    ent_coef = args.ent_coef
+    max_grad_norm = args.max_grad_norm
+    lr = args.lr
+    lrschedule = args.lrschedule
+    epsilon = args.epsilon
+    alpha = args.alpha
+    gamma = args.gamma
+    log_interval = args.log_interval
+    delib_cost = args.delib_cost
 
-    tf.reset_default_graph()
-    set_global_seeds(seed)
+    num_options = args.nopts
+    option_eps = args.opt_eps
 
     nenvs = env.num_envs
     ob_space = env.observation_space
     ac_space = env.action_space
-    num_options = args.nopts
-    option_eps = args.opt_eps
+
+    tf.reset_default_graph()
+    set_global_seeds(seed)
 
     num_procs = len(env.remotes) # HACK
     model = Model(model_template=model_template, num_options=num_options, ob_space=ob_space, ac_space=ac_space, nenvs=nenvs, nsteps=nsteps, nstack=nstack, num_procs=num_procs, ent_coef=ent_coef, vf_coef=vf_coef,

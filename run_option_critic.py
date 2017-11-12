@@ -3,7 +3,7 @@ from baselines.common.atari_wrappers import make_atari, wrap_deepmind
 
 from model import learn
 
-def train(model_template, env_id, num_timesteps, seed, policy, lrschedule, num_cpu):
+def train(model_template, env_id, num_timesteps, seed, lrschedule, num_cpu):
     def make_env(rank):
         def _thunk():
             env = make_atari(env_id)
@@ -50,7 +50,7 @@ def main():
     ]
 
     train(model, args.env, num_timesteps=args.num_timesteps, seed=args.seed,
-        policy=args.policy, lrschedule=args.lrschedule, num_cpu=16)
+        lrschedule=args.lrschedule, num_cpu=16)
 
 if __name__ == '__main__':
     main()
