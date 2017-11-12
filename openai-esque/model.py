@@ -20,9 +20,16 @@ class Model():
 
         config.gpu_options.allow_growth = True
         sess = tf.Session(config=config)
+        self.sess = sess
+
+        self.rng = np.random.RandomState(0) # TODO
+
         nact = ac_space.n
         nbatch = nenvs*nsteps
         nopt = num_options
+
+        self.option_eps = option_eps
+        self.action_eps = epsilon
 
         batch_indexer = tf.range(nbatch)
 
@@ -40,15 +47,16 @@ class Model():
 
         self.responsible_options = tf.stack([batch_indexer, self.options], axis=1)
         self.responsible_actions = tf.stack([batch_indexer, self.actions], axis=1)
+        self.network_indexer = tf.stack([self.options, batch_indexer], axis=1)
 
         self.disconnected_q_vals = tf.stop_gradient(self.train_model.q_values_options)
         self.option_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
-
         self.disconnected_option_q_vals = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
-        self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
 
-        self.action_values = tf.gather_nd(params=self.train_model.intra_options_q_vals, indices=self.responsible_options)
-        self.action_values = tf.gather_nd(params=self.action_values, indices=self.responsible_actions)
+        self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
+        
+        relevant_networks = tf.gather_nd(params=self.train_model.intra_options_q_vals, indices=self.network_indexer)
+        self.action_values = tf.gather_nd(params=relevant_networks, indices=self.responsible_actions)
 
         self.value = tf.reduce_max(self.train_model.q_values_options) * (1 - option_eps) + (option_eps * tf.reduce_mean(self.train_model.q_values_options))
         self.disconnected_value = tf.stop_gradient(self.value)
@@ -58,7 +66,7 @@ class Model():
         self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_option_q_vals))
         self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + delib_cost) )
         
-        # TODO: Look at entropy!
+        # TODO: Look at entropy! and Loss Signs
         self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
 
         self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_loss
@@ -81,8 +89,6 @@ class Model():
         lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
 
         def train(obs, options, actions, rewards):
-            print(sess.run(tf.report_uninitialized_variables()))
-
             feed_dict = {
                 self.train_model.observations : obs,
                 self.actions: actions,
@@ -109,9 +115,29 @@ class Model():
         tf.global_variables_initializer().run(session=sess)
 
 
+    def initialize_options(self, observations):
+        q_values_options = self.sess.run(self.step_model.q_values_options, {self.step_model.observations: observations})
+        options = [np.argmax(q_vals) \
+            if self.rng.rand() > self.option_eps \
+            else self.rng.randint(self.num_options) for q_vals in q_values_options
+        ]
+
+        return options
+
+
+    def get_action(self, observations, current_option):
+        actions = self.sess.run(self.intra_options_q_vals[current_option], {self.observations: observations})
+        return self.rng.choice(range(self.num_actions), p=actions)
+
+
+    def get_termination(self, observations, current_option):
+        termination_prob = self.sess.run(self.termination_fn, {self.observations: observations})
+        return termination_prob[current_option] > self.rng.rand()
+
+
 class Runner(object):
 
-    def __init__(self, env, model, nsteps=5, nstack=4, gamma=0.99):
+    def __init__(self, env, model, nsteps=20, nstack=4, gamma=0.99):
         self.env = env
         self.model = model
         nh, nw, nc = env.observation_space.shape
@@ -120,10 +146,12 @@ class Runner(object):
         self.obs = np.zeros((nenv, nh, nw, nc*nstack), dtype=np.uint8)
         self.nc = nc
 
-        self.options = np.zeros(nenv) # current options; TODO
+        self.options = np.zeros(nenv)
 
         obs = env.reset()
         self.update_obs(obs)
+        self.options = self.model.initialize_options(self.obs)
+
         self.gamma = gamma
         self.nsteps = nsteps
         self.states = model.initial_state
@@ -134,6 +162,7 @@ class Runner(object):
         # IPC overhead
         self.obs = np.roll(self.obs, shift=-self.nc, axis=3)
         self.obs[:, :, :, -self.nc:] = obs
+
 
     def run(self):
         mb_obs, mb_options, mb_rewards, mb_actions, mb_values, mb_dones = [],[],[],[],[],[]
@@ -231,6 +260,8 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
 
         for update in range(1, total_timesteps//nbatch+1):
             obs, options, rewards, actions, values = runner.run()
-            policy_loss, value_loss, policy_entropy = model.train(obs, options, rewards, actions)
+            summary = model.train(obs, options, rewards, actions)
+
+            writer.add_summary(summary, global_step=update)
 
     env.close()
