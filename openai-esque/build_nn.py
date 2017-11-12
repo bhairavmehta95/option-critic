@@ -44,7 +44,7 @@ def get_init(model, t, conv=False):
         return tf.constant_initializer(model[t])
 
     else:
-        return model[t]
+        print("unknown initializer.")
 
 
 class Network():
@@ -131,8 +131,8 @@ class Network():
                 kernel_size=model["filter_size"], 
                 strides=stride, 
                 activation=self.get_activation(model),
-                kernel_initializer=get_init(model, "W", conv=True),
-                bias_initializer=get_init(model, "b"),
+                # kernel_initializer=get_init(model, "W", conv=True),
+                # bias_initializer=get_init(model, "b"),
                 padding="valid" if "pad" not in model else model["pad"],
                 name=model["name"]
             )
@@ -145,8 +145,8 @@ class Network():
                 inputs=inputs, 
                 units=model["out_size"],
                 activation=self.get_activation(model),
-                kernel_initializer=get_init(model, "W"),
-                bias_initializer=get_init(model, "b"),
+                # kernel_initializer=get_init(model, "W"),
+                # bias_initializer=get_init(model, "b"),
                 name=model["name"]
             )
 
@@ -156,8 +156,8 @@ class Network():
                 inputs=inputs,
                 units=1,
                 activation=None,
-                kernel_initializer=get_init(model, "W"),
-                bias_initializer=get_init(model, "b"),
+                # kernel_initializer=get_init(model, "W"),
+                # bias_initializer=get_init(model, "b"),
                 name='value'
             )
 
@@ -167,8 +167,8 @@ class Network():
                     inputs=inputs,
                     units=self.nopt,
                     activation=tf.nn.sigmoid,
-                    kernel_initializer=get_init(model, "W"),
-                    bias_initializer=get_init(model, "b"),
+                    # kernel_initializer=get_init(model, "W"),
+                    # bias_initializer=get_init(model, "b"),
                     name='termination_fn'
                 )
 
@@ -177,18 +177,18 @@ class Network():
                     inputs=inputs,
                     units=self.nopt,
                     activation=None,
-                    kernel_initializer=get_init(model, "W"),
-                    bias_initializer=get_init(model, "b"),
+                    # kernel_initializer=get_init(model, "W"),
+                    # bias_initializer=get_init(model, "b"),
                     name='q_values_options'
                 )
 
-            else:
+            else: # Intraoption Policy
                 layer = tf.layers.dense(
                     inputs=inputs,
                     units=self.nact,
                     activation=None,
-                    kernel_initializer=get_init(model, "W"),
-                    bias_initializer=get_init(model, "b"),
+                    # kernel_initializer=get_init(model, "W"),
+                    # bias_initializer=get_init(model, "b"),
                     name=name
                 )
 

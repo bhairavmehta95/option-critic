@@ -208,7 +208,7 @@ class Runner(object):
 
             if dones[-1] == 0:
                 # TODO: why isn't bootstrapping working?
-                rewards = discount_with_dones(rewards + [0.0], dones+[0], self.gamma)[:-1]
+                rewards = discount_with_dones(rewards + [value[-1]], dones+[0], self.gamma)[:-1]
             else:
                 rewards = discount_with_dones(rewards, dones, self.gamma)
 
@@ -260,7 +260,7 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
 
         for update in range(1, total_timesteps//nbatch+1):
             obs, options, rewards, actions, values = runner.run()
-            summary = model.train(obs, options, rewards, actions)
+            summary = model.train(obs, options, actions, rewards)
 
             writer.add_summary(summary, global_step=update)
 
