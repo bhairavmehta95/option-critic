@@ -25,28 +25,6 @@ def get_activation(activation):
     return output
 
 
-def get_init(model, t, conv=False):
-    initializers = {"zeros": tf.constant_initializer(0.), "norm": tf.random_normal_initializer(0.1)}
-
-    if conv:
-        return tf.random_normal_initializer()
-
-    if t not in model:
-        if t == "b":
-            return tf.constant_initializer(0.)
-    
-        return tf.random_normal_initializer()
-
-    elif isinstance(model[t], basestring):
-        return initializers[model[t]]
-
-    elif isinstance(model[t], int):
-        return tf.constant_initializer(model[t])
-
-    else:
-        return model[t]
-
-
 class Network():
     def __init__(self, model_in, nopt, ob_space, ac_space, nenvs, nsteps, nstack, reuse=False):
         """
@@ -131,8 +109,8 @@ class Network():
                 kernel_size=model["filter_size"], 
                 strides=stride, 
                 activation=self.get_activation(model),
-                kernel_initializer=get_init(model, "W", conv=True),
-                bias_initializer=get_init(model, "b"),
+                # kernel_initializer=get_init(model, "W", conv=True),
+                # bias_initializer=get_init(model, "b"),
                 padding="valid" if "pad" not in model else model["pad"],
                 name=model["name"]
             )
@@ -145,8 +123,8 @@ class Network():
                 inputs=inputs, 
                 units=model["out_size"],
                 activation=self.get_activation(model),
-                kernel_initializer=get_init(model, "W"),
-                bias_initializer=get_init(model, "b"),
+                # kernel_initializer=get_init(model, "W"),
+                # bias_initializer=get_init(model, "b"),
                 name=model["name"]
             )
 
@@ -156,8 +134,8 @@ class Network():
                 inputs=inputs,
                 units=1,
                 activation=None,
-                kernel_initializer=get_init(model, "W"),
-                bias_initializer=get_init(model, "b"),
+                # kernel_initializer=get_init(model, "W"),
+                # bias_initializer=get_init(model, "b"),
                 name='value'
             )
 
@@ -167,8 +145,8 @@ class Network():
                     inputs=inputs,
                     units=self.nopt,
                     activation=tf.nn.sigmoid,
-                    kernel_initializer=get_init(model, "W"),
-                    bias_initializer=get_init(model, "b"),
+                    # kernel_initializer=get_init(model, "W"),
+                    # bias_initializer=get_init(model, "b"),
                     name='termination_fn'
                 )
 
@@ -177,18 +155,18 @@ class Network():
                     inputs=inputs,
                     units=self.nopt,
                     activation=None,
-                    kernel_initializer=get_init(model, "W"),
-                    bias_initializer=get_init(model, "b"),
+                    # kernel_initializer=get_init(model, "W"),
+                    # bias_initializer=get_init(model, "b"),
                     name='q_values_options'
                 )
 
-            else:
+            else: # Intraoption Policy
                 layer = tf.layers.dense(
                     inputs=inputs,
                     units=self.nact,
                     activation=None,
-                    kernel_initializer=get_init(model, "W"),
-                    bias_initializer=get_init(model, "b"),
+                    # kernel_initializer=get_init(model, "W"),
+                    # bias_initializer=get_init(model, "b"),
                     name=name
                 )
 
@@ -217,24 +195,43 @@ class Network():
         return value
 
 
-    # TODO: REMOVE DEFAULT VALUE
-    def step(self, observations, current_option=0):
-        action_probabilities, value = self.sess.run([
-                tf.nn.softmax(self.intra_options_q_vals[current_option], dim=1), 
-                self.value_fn
-            ], 
+    def step(self, observations, current_options):
+        option_action_probabilities, value = self.sess.run([
+                tf.nn.softmax(self.intra_options_q_vals, dim=2), 
+                self.value_fn,
+            ],
             feed_dict={self.observations: observations}
         )
 
         act_to_take = []
-        for act_prob in action_probabilities:
+        for idx, option in enumerate(current_options):
+            act_prob = option_action_probabilities[option][idx]
             act_to_take.append(self.rng.choice(range(self.nact), p=act_prob))
 
-        return act_to_take, value
+        return act_to_take, value[:, 0]
 
 
-    def get_termination(self, observations, current_option):
-        termination_prob = self.sess.run(self.termination_fn, {self.observations: observations})
-        return termination_prob[current_option] > self.rng.rand()
+    def update_options(self, observations, current_options, option_eps):
+        q_values_options, termination_prob = self.sess.run([
+                self.q_values_options,
+                self.termination_fn
+            ],
+            feed_dict={self.observations: observations}
+        )
+
+        for idx, option in enumerate(current_options):
+            if termination_prob[idx][option] > self.rng.rand():
+                new_option = q_values_options[idx].argmax() \
+                    if self.rng.rand() > option_eps \
+                    else self.rng.randint(self.nopt)
+
+                current_options[idx] = new_option
+            else:
+                continue # Did not terminate
+
+        return current_options
+
+
+        
 
 
