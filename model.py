@@ -38,7 +38,9 @@ class Model():
         self.actions = tf.placeholder(shape=[nbatch], dtype=tf.int32)
         self.options = tf.placeholder(shape=[nbatch], dtype=tf.int32)
         self.rewards = tf.placeholder(shape=[nbatch], dtype=tf.float32)
+        self.deliberation_costs = tf.placeholder(shape=[nbatch], dtype=tf.float32)
         self.lr = tf.placeholder(shape=[], dtype=tf.float32)
+
 
         summary = []
 
@@ -53,10 +55,10 @@ class Model():
 
         # Q Values OVER options
         self.disconnected_q_vals = tf.stop_gradient(self.train_model.q_values_options)
-        self.disconnected_q_vals_option = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options)
 
         # Q values of each option that was taken
         self.responsible_option_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
+        self.disconnected_q_vals_option = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options)
 
         # Termination probability of each optof each optionion that was taken
         self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
@@ -72,7 +74,7 @@ class Model():
         # Losses; TODO: Why reduce sum vs reduce mean?
         self.value_loss = 0.5 * tf.reduce_sum(vf_coef * tf.square(self.rewards - self.responsible_option_q_vals)))
         self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_q_vals_option))
-        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_q_vals_option - self.disconnected_value) + delib_cost) )
+        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_q_vals_option - self.disconnected_value) + self.deliberation_costs) )
 
         # TODO: Signs
         action_probabilities = tf.nn.softmax(self.train_model.intra_options_q_vals, dim=1)
@@ -166,7 +168,7 @@ class Runner(object):
 
 
     def run(self):
-        mb_obs, mb_options, mb_rewards, mb_actions, mb_values, mb_dones = [],[],[],[],[],[]
+        mb_obs, mb_options, mb_rewards, mb_actions, mb_values, mb_dones, mb_costs = [],[],[],[],[],[],[]
 
         for n in range(self.nsteps):
             actions, values = self.model.step(self.obs, self.options)
@@ -188,7 +190,8 @@ class Runner(object):
             self.update_obs(obs)
 
             # Update options if not done -- TODO: What to do w option if it is done?
-            self.options = self.model.update_options(self.obs, self.options, self.option_eps)
+            # TODO: Deliberation cost for each example?
+            self.options, new_costs = self.model.update_options(self.obs, self.options, self.option_eps
 
             mb_rewards.append(rewards)
 
