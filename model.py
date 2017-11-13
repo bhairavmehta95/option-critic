@@ -40,33 +40,41 @@ class Model():
         self.rewards = tf.placeholder(shape=[nbatch], dtype=tf.float32)
         self.lr = tf.placeholder(shape=[], dtype=tf.float32)
 
-        self.summary = []
+        summary = []
 
+        # Networks
         self.step_model = Network(model_template, nopt, ob_space, ac_space, nenvs, 1, nstack, reuse=False)
         self.train_model = Network(model_template, nopt, ob_space, ac_space, nenvs, nsteps, nstack, reuse=True)
-        
+
+        # Indexers
         self.responsible_options = tf.stack([batch_indexer, self.options], axis=1)
         self.responsible_actions = tf.stack([batch_indexer, self.actions], axis=1)
         self.network_indexer = tf.stack([self.options, batch_indexer], axis=1)
 
+        # Q Values OVER options
         self.disconnected_q_vals = tf.stop_gradient(self.train_model.q_values_options)
-        self.option_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
-        self.disconnected_option_q_vals = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
+        self.disconnected_q_vals_option = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options)
 
+        # Q values of each option that was taken
+        self.responsible_option_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
+
+        # Termination probability of each optof each optionion that was taken
         self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
 
+        # Q values for each action that was taken
         relevant_networks = tf.gather_nd(params=self.train_model.intra_options_q_vals, indices=self.network_indexer)
         self.action_values = tf.gather_nd(params=relevant_networks, indices=self.responsible_actions)
 
+        # Weighted average value
         self.value = tf.reduce_max(self.train_model.q_values_options) * (1 - option_eps) + (option_eps * tf.reduce_mean(self.train_model.q_values_options))
         self.disconnected_value = tf.stop_gradient(self.value)
 
-        # Losses
-        self.value_loss = 0.5 * tf.reduce_sum(vf_coef * tf.square(self.rewards - tf.reshape(self.train_model.value_fn, [-1])))
-        self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_option_q_vals))
-        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + delib_cost) )
+        # Losses; TODO: Why reduce sum vs reduce mean?
+        self.value_loss = 0.5 * tf.reduce_sum(vf_coef * tf.square(self.rewards - self.responsible_option_q_vals)))
+        self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_q_vals_option))
+        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_q_vals_option - self.disconnected_value) + delib_cost) )
 
-        # TODO: Look at entropy! and Loss Signs
+        # TODO: Signs
         action_probabilities = tf.nn.softmax(self.train_model.intra_options_q_vals, dim=1)
         self.entropy = tf.reduce_sum(action_probabilities * tf.log(action_probabilities))
 
@@ -81,11 +89,11 @@ class Model():
         self.apply_grads = self.trainer.apply_gradients(grads)
 
         # Summary
-        self.summary.append(tf.summary.scalar('policy_loss', self.policy_loss))
-        self.summary.append(tf.summary.scalar('value_loss', self.value_loss))
-        self.summary.append(tf.summary.scalar('termination_loss', self.termination_loss))
-        self.summary.append(tf.summary.scalar('entropy', self.entropy))
-        self.summary_op = tf.summary.merge(self.summary)
+        summary.append(tf.summary.scalar('policy_loss', self.policy_loss))
+        summary.append(tf.summary.scalar('value_loss', self.value_loss))
+        summary.append(tf.summary.scalar('termination_loss', self.termination_loss))
+        summary.append(tf.summary.scalar('entropy', self.entropy))
+        self.summary_op = tf.summary.merge(summary)
 
         lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
 
