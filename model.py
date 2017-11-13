@@ -41,7 +41,6 @@ class Model():
         self.deliberation_costs = tf.placeholder(shape=[nbatch], dtype=tf.float32)
         self.lr = tf.placeholder(shape=[], dtype=tf.float32)
 
-
         summary = []
 
         # Networks
@@ -60,7 +59,7 @@ class Model():
         self.responsible_option_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
         self.disconnected_q_vals_option = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options)
 
-        # Termination probability of each optof each optionion that was taken
+        # Termination probability of each option that was taken
         self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
 
         # Q values for each action that was taken
@@ -72,7 +71,7 @@ class Model():
         self.disconnected_value = tf.stop_gradient(self.value)
 
         # Losses; TODO: Why reduce sum vs reduce mean?
-        self.value_loss = 0.5 * tf.reduce_sum(vf_coef * tf.square(self.rewards - self.responsible_option_q_vals)))
+        self.value_loss = 0.5 * tf.reduce_sum(vf_coef * tf.square(self.rewards - self.responsible_option_q_vals))
         self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_q_vals_option))
         self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_q_vals_option - self.disconnected_value) + self.deliberation_costs) )
 
@@ -99,12 +98,13 @@ class Model():
 
         lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
 
-        def train(obs, options, actions, rewards):
+        def train(obs, options, actions, rewards, costs):
             feed_dict = {
                 self.train_model.observations : obs,
                 self.actions: actions,
                 self.options: options,
                 self.rewards: rewards,
+                self.deliberation_costs: costs
             }
 
             train_ops = [self.grad_norms, self.summary_op]
@@ -139,7 +139,7 @@ class Model():
 
 
 class Runner(object):
-    def __init__(self, env, model, nsteps=20, nstack=4, gamma=0.99, option_eps=0.001):
+    def __init__(self, env, model, nsteps=20, nstack=4, gamma=0.99, option_eps=0.001, delib_cost=0.020):
         self.env = env
         self.model = model
         nh, nw, nc = env.observation_space.shape
@@ -148,6 +148,7 @@ class Runner(object):
         self.obs = np.zeros((nenv, nh, nw, nc*nstack), dtype=np.uint8)
         self.nc = nc
         self.option_eps = option_eps
+        self.delib_cost = delib_cost
 
         self.options = np.zeros(nenv)
 
@@ -191,7 +192,8 @@ class Runner(object):
 
             # Update options if not done -- TODO: What to do w option if it is done?
             # TODO: Deliberation cost for each example?
-            self.options, new_costs = self.model.update_options(self.obs, self.options, self.option_eps
+            self.options, costs = self.model.update_options(self.obs, self.options, self.option_eps, self.delib_cost)
+            mb_costs.append(costs)
 
             mb_rewards.append(rewards)
 
@@ -204,6 +206,7 @@ class Runner(object):
         mb_options = np.asarray(mb_options, dtype=np.int32).swapaxes(1, 0)
         mb_values = np.asarray(mb_values, dtype=np.float32).swapaxes(1, 0)
         mb_dones = np.asarray(mb_dones, dtype=np.bool).swapaxes(1, 0)
+        mb_costs = np.asarray(mb_costs, dtype=np.float32).swapaxes(1, 0)
 
         mb_dones = mb_dones[:, 1:]
         last_values = self.model.value(self.obs).tolist()
@@ -224,8 +227,9 @@ class Runner(object):
         mb_actions = mb_actions.flatten()
         mb_options = mb_options.flatten()
         mb_values = mb_values.flatten()
+        mb_costs = mb_costs.flatten()
 
-        return mb_obs, mb_options, mb_rewards, mb_actions, mb_values
+        return mb_obs, mb_options, mb_rewards, mb_actions, mb_values, mb_costs
 
 def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), args=None):
     vf_coef = args.vf_coef
@@ -252,7 +256,7 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
     num_procs = len(env.remotes) # HACK
     model = Model(model_template=model_template, num_options=num_options, ob_space=ob_space, ac_space=ac_space, nenvs=nenvs, nsteps=nsteps, nstack=nstack, num_procs=num_procs, ent_coef=ent_coef, vf_coef=vf_coef,
         max_grad_norm=max_grad_norm, lr=lr, alpha=alpha, epsilon=epsilon, total_timesteps=total_timesteps, lrschedule=lrschedule, option_eps=option_eps, delib_cost=delib_cost)
-    runner = Runner(env, model, nsteps=nsteps, nstack=nstack, gamma=gamma, option_eps=option_eps)
+    runner = Runner(env, model, nsteps=nsteps, nstack=nstack, gamma=gamma, option_eps=option_eps, delib_cost=delib_cost)
 
     nbatch = nenvs*nsteps
     tstart = time.time()
@@ -265,8 +269,8 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
         sess.run(tf.local_variables_initializer())
 
         for update in range(1, total_timesteps//nbatch+1):
-            obs, options, rewards, actions, values = runner.run()
-            summary = model.train(obs, options, actions, rewards)
+            obs, options, rewards, actions, values, costs = runner.run()
+            summary = model.train(obs, options, actions, rewards, costs)
 
             writer.add_summary(summary, global_step=update)
 

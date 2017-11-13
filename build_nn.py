@@ -190,7 +190,9 @@ class Network():
         return act_to_take, value[:, 0]
 
 
-    def update_options(self, observations, current_options, option_eps):
+    def update_options(self, observations, current_options, option_eps, delib_cost):
+        costs = np.zeros(len(current_options))
+
         q_values_options, termination_prob = self.sess.run([
                 self.q_values_options,
                 self.termination_fn
@@ -205,8 +207,9 @@ class Network():
                     if self.rng.rand() > option_eps \
                     else self.rng.randint(self.nopt)
 
+                costs[idx] = delib_cost
                 current_options[idx] = new_option
             else:
                 continue # Did not terminate
 
-        return current_options
+        return current_options, costs
