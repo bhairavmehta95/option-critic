@@ -67,9 +67,10 @@ class Model():
         self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + delib_cost) )
         
         # TODO: Look at entropy! and Loss Signs
-        self.entropy = -1 * tf.reduce_sum(self.action_values*tf.log(self.action_values))
+        action_probabilities = tf.nn.softmax(self.train_model.intra_options_q_vals, dim=1)
+        self.entropy = tf.reduce_sum(action_probabilities * tf.log(action_probabilities))
 
-        self.loss = self.policy_loss + self.entropy - self.value_loss - self.termination_loss
+        self.loss = self.policy_loss - ent_coef * self.entropy - self.value_loss - self.termination_loss
 
         # Gradients
         self.vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'model')        
@@ -101,6 +102,7 @@ class Model():
 
             return summary
 
+
         def setup_tensorflow(sess, writer):
             self.step_model.setup_tensorflow(sess, writer)
             self.train_model.setup_tensorflow(sess, writer)            
@@ -111,6 +113,7 @@ class Model():
         self.initial_state = self.step_model.initial_state
         self.step = self.step_model.step
         self.value = self.step_model.value
+        self.update_options = self.step_model.update_options
 
         tf.global_variables_initializer().run(session=sess)
 
@@ -125,19 +128,8 @@ class Model():
         return options
 
 
-    def get_action(self, observations, current_option):
-        actions = self.sess.run(self.intra_options_q_vals[current_option], {self.observations: observations})
-        return self.rng.choice(range(self.num_actions), p=actions)
-
-
-    def get_termination(self, observations, current_option):
-        termination_prob = self.sess.run(self.termination_fn, {self.observations: observations})
-        return termination_prob[current_option] > self.rng.rand()
-
-
 class Runner(object):
-
-    def __init__(self, env, model, nsteps=20, nstack=4, gamma=0.99):
+    def __init__(self, env, model, nsteps=20, nstack=4, gamma=0.99, option_eps=0.001):
         self.env = env
         self.model = model
         nh, nw, nc = env.observation_space.shape
@@ -145,6 +137,7 @@ class Runner(object):
         self.batch_ob_shape = (nenv*nsteps, nh, nw, nc*nstack)
         self.obs = np.zeros((nenv, nh, nw, nc*nstack), dtype=np.uint8)
         self.nc = nc
+        self.option_eps = option_eps
 
         self.options = np.zeros(nenv)
 
@@ -168,8 +161,7 @@ class Runner(object):
         mb_obs, mb_options, mb_rewards, mb_actions, mb_values, mb_dones = [],[],[],[],[],[]
 
         for n in range(self.nsteps):
-            # TODO: Put option picking stuff here!
-            actions, values = self.model.step(self.obs)
+            actions, values = self.model.step(self.obs, self.options)
 
             mb_obs.append(np.copy(self.obs))
             mb_options.append(np.copy(self.options))
@@ -186,6 +178,10 @@ class Runner(object):
                     self.obs[n] = self.obs[n]*0
 
             self.update_obs(obs)
+
+            # Update options if not done -- TODO: What to do w option if it is done?
+            self.options = self.model.update_options(self.obs, self.options, self.option_eps)
+
             mb_rewards.append(rewards)
 
         mb_dones.append(self.dones)
@@ -207,8 +203,7 @@ class Runner(object):
             dones = dones.tolist()
 
             if dones[-1] == 0:
-                # TODO: why isn't bootstrapping working?
-                rewards = discount_with_dones(rewards + [value[-1]], dones+[0], self.gamma)[:-1]
+                rewards = discount_with_dones(rewards + [value[0]], dones+[0], self.gamma)[:-1]
             else:
                 rewards = discount_with_dones(rewards, dones, self.gamma)
 
@@ -246,7 +241,7 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
     num_procs = len(env.remotes) # HACK
     model = Model(model_template=model_template, num_options=num_options, ob_space=ob_space, ac_space=ac_space, nenvs=nenvs, nsteps=nsteps, nstack=nstack, num_procs=num_procs, ent_coef=ent_coef, vf_coef=vf_coef,
         max_grad_norm=max_grad_norm, lr=lr, alpha=alpha, epsilon=epsilon, total_timesteps=total_timesteps, lrschedule=lrschedule, option_eps=option_eps, delib_cost=delib_cost)
-    runner = Runner(env, model, nsteps=nsteps, nstack=nstack, gamma=gamma)
+    runner = Runner(env, model, nsteps=nsteps, nstack=nstack, gamma=gamma, option_eps=option_eps)
 
     nbatch = nenvs*nsteps
     tstart = time.time()
