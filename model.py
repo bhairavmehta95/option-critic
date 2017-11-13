@@ -11,7 +11,7 @@ from baselines.a2c.utils import Scheduler, discount_with_dones
 
 class Model():
     def __init__(self, model_template, num_options, ob_space, ac_space, nenvs, nsteps, nstack, num_procs,
-            ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4, alpha=0.99, epsilon=1e-5, 
+            ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4, alpha=0.99, epsilon=1e-5,
             total_timesteps=int(80e6), lrschedule='linear', option_eps=0.001, delib_cost=0.001):
 
         config = tf.ConfigProto(allow_soft_placement=True,
@@ -44,7 +44,7 @@ class Model():
 
         self.step_model = Network(model_template, nopt, ob_space, ac_space, nenvs, 1, nstack, reuse=False)
         self.train_model = Network(model_template, nopt, ob_space, ac_space, nenvs, nsteps, nstack, reuse=True)
-
+        
         self.responsible_options = tf.stack([batch_indexer, self.options], axis=1)
         self.responsible_actions = tf.stack([batch_indexer, self.actions], axis=1)
         self.network_indexer = tf.stack([self.options, batch_indexer], axis=1)
@@ -54,7 +54,7 @@ class Model():
         self.disconnected_option_q_vals = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options) # Extract q values for each option
 
         self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
-        
+
         relevant_networks = tf.gather_nd(params=self.train_model.intra_options_q_vals, indices=self.network_indexer)
         self.action_values = tf.gather_nd(params=relevant_networks, indices=self.responsible_actions)
 
@@ -65,7 +65,7 @@ class Model():
         self.value_loss = 0.5 * tf.reduce_sum(vf_coef * tf.square(self.rewards - tf.reshape(self.train_model.value_fn, [-1])))
         self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_option_q_vals))
         self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_option_q_vals - self.disconnected_value) + delib_cost) )
-        
+
         # TODO: Look at entropy! and Loss Signs
         action_probabilities = tf.nn.softmax(self.train_model.intra_options_q_vals, dim=1)
         self.entropy = tf.reduce_sum(action_probabilities * tf.log(action_probabilities))
@@ -73,7 +73,7 @@ class Model():
         self.loss = self.policy_loss - ent_coef * self.entropy - self.value_loss - self.termination_loss
 
         # Gradients
-        self.vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'model')        
+        self.vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'model')
         self.gradients = tf.gradients(self.loss, self.vars)
         grads, self.grad_norms = tf.clip_by_global_norm(self.gradients, max_grad_norm)
         grads = list(zip(grads, self.vars))
@@ -105,7 +105,7 @@ class Model():
 
         def setup_tensorflow(sess, writer):
             self.step_model.setup_tensorflow(sess, writer)
-            self.train_model.setup_tensorflow(sess, writer)            
+            self.train_model.setup_tensorflow(sess, writer)
 
         self.train = train
         self.setup_tensorflow = setup_tensorflow
@@ -216,7 +216,7 @@ class Runner(object):
 
         return mb_obs, mb_options, mb_rewards, mb_actions, mb_values
 
-def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), args=None):   
+def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e6), args=None):
     vf_coef = args.vf_coef
     ent_coef = args.ent_coef
     max_grad_norm = args.max_grad_norm

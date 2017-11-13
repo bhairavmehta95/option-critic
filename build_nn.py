@@ -27,29 +27,19 @@ def get_activation(activation):
 
 class Network():
     def __init__(self, model_in, nopt, ob_space, ac_space, nenvs, nsteps, nstack, reuse=False):
-        """
-        example model:
-        model = [{"model_type": "conv", "filter_size": [5,5], "pool": [1,1], "stride": [1,1], "out_size": 5},
-                 {"model_type": "conv", "filter_size": [7,7], "pool": [1,1], "stride": [1,1], "out_size": 15},
-                 {"model_type": "mlp", "out_size": 300, "activation": "tanh"},
-                 {"model_type": "mlp", "out_size": 10, "activation": "softmax"}]
-        """
-        # self.reset_storing()
-
         with tf.variable_scope("model", reuse=reuse):
             self.nbatches = nenvs * nsteps
             self.nh, self.nw, self.nc = ob_space.shape
             self.ob_shape = (self.nbatches, self.nh, self.nw, self.nc*nstack)
             self.nact = ac_space.n
             self.nopt = nopt
-            self.rng = np.random.RandomState(0) # TODO
+            self.rng = np.random.RandomState(0) # TODO - what seed to send?
 
-            # TODO: Uint8
-            self.observations = tf.placeholder(shape=self.ob_shape, dtype=tf.float32)
+            self.observations = tf.placeholder(shape=self.ob_shape, dtype=tf.uint8)
 
             self.summary = []
 
-            input_tensor = self.observations
+            input_tensor = tf.cast(self.observations, tf.float32) / 255.0
 
             print("Building following model...")
             print(model_in)
@@ -57,8 +47,8 @@ class Network():
             self.model = model_in
             self.input_size = ob_space.shape
             self.out_size = model_in[-3]["out_size"]
-            
-            dnn_type = True # TODO
+
+            dnn_type = True # TODO: Make this cuda enabled?
 
             # Build Main NN
             for i, m in enumerate(model_in):
@@ -73,12 +63,13 @@ class Network():
             m = dict()
             m["model_type"] = 'value'
 
+            # Build Value output
             self.value_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='value')
 
             m = dict()
             m["model_type"] = 'option'
-            
-            # Build Option Related End Networks 
+
+            # Build Option Related End Networks
             self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
             self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
 
@@ -88,7 +79,7 @@ class Network():
                 self.intra_options_q_vals.append(intra_option)
 
             self.initial_state = [] # For reproducability with OpenAI code
-            
+
             print("Build complete.")
 
 
@@ -104,13 +95,11 @@ class Network():
             stride = tuple(model["stride"]) if "stride" in model else (1,1)
 
             layer = tf.layers.conv2d(
-                inputs=inputs, 
-                filters=model["out_size"], 
-                kernel_size=model["filter_size"], 
-                strides=stride, 
+                inputs=inputs,
+                filters=model["out_size"],
+                kernel_size=model["filter_size"],
+                strides=stride,
                 activation=self.get_activation(model),
-                # kernel_initializer=get_init(model, "W", conv=True),
-                # bias_initializer=get_init(model, "b"),
                 padding="valid" if "pad" not in model else model["pad"],
                 name=model["name"]
             )
@@ -120,11 +109,9 @@ class Network():
 
         elif model["model_type"] == "mlp":
             layer = tf.layers.dense(
-                inputs=inputs, 
+                inputs=inputs,
                 units=model["out_size"],
                 activation=self.get_activation(model),
-                # kernel_initializer=get_init(model, "W"),
-                # bias_initializer=get_init(model, "b"),
                 name=model["name"]
             )
 
@@ -134,8 +121,6 @@ class Network():
                 inputs=inputs,
                 units=1,
                 activation=None,
-                # kernel_initializer=get_init(model, "W"),
-                # bias_initializer=get_init(model, "b"),
                 name='value'
             )
 
@@ -145,8 +130,6 @@ class Network():
                     inputs=inputs,
                     units=self.nopt,
                     activation=tf.nn.sigmoid,
-                    # kernel_initializer=get_init(model, "W"),
-                    # bias_initializer=get_init(model, "b"),
                     name='termination_fn'
                 )
 
@@ -155,8 +138,6 @@ class Network():
                     inputs=inputs,
                     units=self.nopt,
                     activation=None,
-                    # kernel_initializer=get_init(model, "W"),
-                    # bias_initializer=get_init(model, "b"),
                     name='q_values_options'
                 )
 
@@ -165,8 +146,6 @@ class Network():
                     inputs=inputs,
                     units=self.nact,
                     activation=None,
-                    # kernel_initializer=get_init(model, "W"),
-                    # bias_initializer=get_init(model, "b"),
                     name=name
                 )
 
@@ -180,7 +159,7 @@ class Network():
     def setup_tensorflow(self, sess, writer):
         self.sess = sess
         self.writer = writer
-        
+
         tf.global_variables_initializer().run(session=sess)
         tf.local_variables_initializer().run(session=sess)
 
@@ -197,7 +176,7 @@ class Network():
 
     def step(self, observations, current_options):
         option_action_probabilities, value = self.sess.run([
-                tf.nn.softmax(self.intra_options_q_vals, dim=2), 
+                tf.nn.softmax(self.intra_options_q_vals, dim=2),
                 self.value_fn,
             ],
             feed_dict={self.observations: observations}
@@ -220,6 +199,7 @@ class Network():
         )
 
         for idx, option in enumerate(current_options):
+            # Terminated, pick a new option
             if termination_prob[idx][option] > self.rng.rand():
                 new_option = q_values_options[idx].argmax() \
                     if self.rng.rand() > option_eps \
@@ -230,8 +210,3 @@ class Network():
                 continue # Did not terminate
 
         return current_options
-
-
-        
-
-
