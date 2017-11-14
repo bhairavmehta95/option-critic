@@ -73,10 +73,10 @@ class Network():
             self.termination_fn = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='termination_fn')
             self.q_values_options = self.create_layer(input_tensor, m, dnn_type, name='q_values_options')
 
-            self.intra_options_q_vals = list()
+            self.intra_option_policies = list()
             for i in range(self.nopt):
                 intra_option = self.create_layer(input_tensor, m, dnn_type=dnn_type, name='intra_option_{}'.format(i))
-                self.intra_options_q_vals.append(intra_option)
+                self.intra_option_policies.append(intra_option)
 
             self.initial_state = [] # For reproducability with OpenAI code
 

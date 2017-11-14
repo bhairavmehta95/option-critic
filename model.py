@@ -56,44 +56,45 @@ class Model():
         self.disconnected_q_vals = tf.stop_gradient(self.train_model.q_values_options)
 
         # Q values of each option that was taken
-        self.responsible_option_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
+        self.responsible_opt_q_vals = tf.gather_nd(params=self.train_model.q_values_options, indices=self.responsible_options) # Extract q values for each option
         self.disconnected_q_vals_option = tf.gather_nd(params=self.disconnected_q_vals, indices=self.responsible_options)
 
         # Termination probability of each option that was taken
         self.terminations = tf.gather_nd(params=self.train_model.termination_fn, indices=self.responsible_options)
 
         # Q values for each action that was taken
-        relevant_networks = tf.gather_nd(params=self.train_model.intra_options_q_vals, indices=self.network_indexer)
+        relevant_networks = tf.gather_nd(params=self.train_model.intra_option_policies, indices=self.network_indexer)
         self.action_values = tf.gather_nd(params=relevant_networks, indices=self.responsible_actions)
 
         # Weighted average value
         self.value = tf.reduce_max(self.train_model.q_values_options) * (1 - option_eps) + (option_eps * tf.reduce_mean(self.train_model.q_values_options))
-        self.disconnected_value = tf.stop_gradient(self.value)
+        disconnected_value = tf.stop_gradient(self.value)
 
         # Losses; TODO: Why reduce sum vs reduce mean?
-        self.value_loss = 0.5 * tf.reduce_sum(vf_coef * tf.square(self.rewards - self.responsible_option_q_vals))
-        self.policy_loss = -1 * tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_q_vals_option))
-        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_q_vals_option - self.disconnected_value) + self.deliberation_costs) )
+        self.value_loss = vf_coef * tf.reduce_sum(vf_coef * tf.square(self.rewards - self.responsible_opt_q_vals))
+        self.policy_loss = tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_q_vals_option))
+        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_q_vals_option - disconnected_value) + self.deliberation_costs) )
 
-        # TODO: Signs
-        action_probabilities = tf.nn.softmax(self.train_model.intra_options_q_vals, dim=1)
-        self.entropy = tf.reduce_sum(action_probabilities * tf.log(action_probabilities))
+        action_probabilities = tf.nn.softmax(self.train_model.intra_option_policies, dim=1)
+        self.entropy = ent_coef * tf.reduce_sum(action_probabilities * tf.log(action_probabilities))
 
-        self.loss = self.policy_loss - ent_coef * self.entropy - self.value_loss - self.termination_loss
+        self.loss = -self.policy_loss - self.entropy - self.value_loss - self.termination_loss
 
         # Gradients
-        self.vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'model')
-        self.gradients = tf.gradients(self.loss, self.vars)
-        grads, self.grad_norms = tf.clip_by_global_norm(self.gradients, max_grad_norm)
-        grads = list(zip(grads, self.vars))
-        self.trainer = tf.train.RMSPropOptimizer(learning_rate=lr, decay=alpha, epsilon=epsilon)
-        self.apply_grads = self.trainer.apply_gradients(grads)
+        train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, 'model')
+        gradients = tf.gradients(self.loss, train_vars)
+        grads, grad_norms = tf.clip_by_global_norm(gradients, max_grad_norm)
+        grads = list(zip(grads, train_vars))
+        trainer = tf.train.RMSPropOptimizer(learning_rate=lr, decay=alpha, epsilon=epsilon)
+        self.apply_grads = trainer.apply_gradients(grads)
 
         # Summary
+        avg_reward = tf.reduce_mean(self.rewards)
         summary.append(tf.summary.scalar('policy_loss', self.policy_loss))
         summary.append(tf.summary.scalar('value_loss', self.value_loss))
         summary.append(tf.summary.scalar('termination_loss', self.termination_loss))
         summary.append(tf.summary.scalar('entropy', self.entropy))
+        summary.append(tf.summary.scalar('avg_reward'), avg_reward)
         self.summary_op = tf.summary.merge(summary)
 
         lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
@@ -107,7 +108,7 @@ class Model():
                 self.deliberation_costs: costs
             }
 
-            train_ops = [self.grad_norms, self.summary_op]
+            train_ops = [self.apply_grads, self.summary_op]
             _, summary = sess.run(train_ops, feed_dict=feed_dict)
 
             return summary
@@ -190,8 +191,7 @@ class Runner(object):
 
             self.update_obs(obs)
 
-            # Update options if not done -- TODO: What to do w option if it is done?
-            # TODO: Deliberation cost for each example?
+            # Update current option
             self.options, costs = self.model.update_options(self.obs, self.options, self.option_eps, self.delib_cost)
             mb_costs.append(costs)
 
