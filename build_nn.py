@@ -176,7 +176,7 @@ class Network():
 
     def step(self, observations, current_options):
         option_action_probabilities, value = self.sess.run([
-                tf.nn.softmax(self.intra_options_q_vals, dim=2),
+                tf.nn.softmax(self.intra_option_policies, dim=2),
                 self.value_fn,
             ],
             feed_dict={self.observations: observations}

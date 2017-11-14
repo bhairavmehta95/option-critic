@@ -1,14 +1,11 @@
 import numpy as np
 import tensorflow as tf
-import math, csv, time, sys, os, pdb, copy
 
 from build_nn import Network
 from runner import Runner
 
-from baselines.common import set_global_seeds, explained_variance
-from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
-from baselines.common.atari_wrappers import wrap_deepmind
-from baselines.a2c.utils import Scheduler, discount_with_dones
+from baselines.common import set_global_seeds
+from baselines.a2c.utils import Scheduler
 
 class Model():
     def __init__(self, model_template, num_options, ob_space, ac_space, nenvs, nsteps, nstack, num_procs,
@@ -96,7 +93,7 @@ class Model():
         summary.append(tf.summary.scalar('value_loss', self.value_loss))
         summary.append(tf.summary.scalar('termination_loss', self.termination_loss))
         summary.append(tf.summary.scalar('entropy', self.entropy))
-        summary.append(tf.summary.scalar('avg_reward'), avg_reward)
+        summary.append(tf.summary.scalar('avg_reward', avg_reward))
         self.summary_op = tf.summary.merge(summary)
 
         lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
@@ -169,7 +166,7 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
     runner = Runner(env, model, nsteps=nsteps, nstack=nstack, gamma=gamma, option_eps=option_eps, delib_cost=delib_cost)
 
     nbatch = nenvs*nsteps
-    tstart = time.time()
+    # tstart = time.time()
 
     with tf.Session() as sess:
         writer = tf.summary.FileWriter('log', sess.graph)
