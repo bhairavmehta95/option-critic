@@ -62,6 +62,8 @@ class Model():
 
         # Q values for each action that was taken
         relevant_networks = tf.gather_nd(params=self.train_model.intra_option_policies, indices=self.network_indexer)
+        relevant_networks = tf.nn.softmax(relevant_networks, dim=1)
+        
         self.action_values = tf.gather_nd(params=relevant_networks, indices=self.responsible_actions)
 
         # Weighted average value
@@ -69,12 +71,12 @@ class Model():
         disconnected_value = tf.stop_gradient(self.value)
 
         # Losses; TODO: Why reduce sum vs reduce mean?
-        self.value_loss = vf_coef * tf.reduce_sum(vf_coef * tf.square(self.rewards - self.responsible_opt_q_vals))
-        self.policy_loss = tf.reduce_sum(tf.log(self.action_values)*(self.rewards - self.disconnected_q_vals_option))
-        self.termination_loss = tf.reduce_sum(self.terminations * ((self.disconnected_q_vals_option - disconnected_value) + self.deliberation_costs) )
+        self.value_loss = vf_coef * tf.reduce_mean(vf_coef * tf.square(self.rewards - self.responsible_opt_q_vals))
+        self.policy_loss = tf.reduce_mean(tf.log(self.action_values) * (self.rewards - self.disconnected_q_vals_option))
+        self.termination_loss = tf.reduce_mean(self.terminations * ((self.disconnected_q_vals_option - disconnected_value) + self.deliberation_costs) )
 
         action_probabilities = tf.nn.softmax(self.train_model.intra_option_policies, dim=1)
-        self.entropy = ent_coef * tf.reduce_sum(action_probabilities * tf.log(action_probabilities))
+        self.entropy = ent_coef * tf.reduce_mean(action_probabilities * tf.log(action_probabilities))
 
         self.loss = -self.policy_loss - self.entropy - self.value_loss - self.termination_loss
 
@@ -96,6 +98,8 @@ class Model():
         summary.append(tf.summary.scalar('avg_reward', avg_reward))
         self.summary_op = tf.summary.merge(summary)
 
+        self.print_op = [relevant_networks[0], self.action_values, self.policy_loss, self.value_loss, self.termination_loss, avg_reward]
+
         lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
 
         def train(obs, options, actions, rewards, costs):
@@ -107,8 +111,10 @@ class Model():
                 self.deliberation_costs: costs
             }
 
-            train_ops = [self.apply_grads, self.summary_op]
-            _, summary = sess.run(train_ops, feed_dict=feed_dict)
+            train_ops = [self.apply_grads, self.summary_op, self.print_op]
+            _, summary, summary_str = sess.run(train_ops, feed_dict=feed_dict)
+
+            print(summary_str)
 
             return summary
 
@@ -149,6 +155,7 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
     gamma = args.gamma
     log_interval = args.log_interval
     delib_cost = args.delib_cost
+    log_dir = args.log_dir
 
     num_options = args.nopts
     option_eps = args.opt_eps
@@ -169,7 +176,7 @@ def learn(model_template, env, seed, nsteps=5, nstack=4, total_timesteps=int(80e
     # tstart = time.time()
 
     with tf.Session() as sess:
-        writer = tf.summary.FileWriter('log', sess.graph)
+        writer = tf.summary.FileWriter(log_dir, sess.graph)
         model.setup_tensorflow(sess=sess, writer=writer)
 
         sess.run(tf.global_variables_initializer())

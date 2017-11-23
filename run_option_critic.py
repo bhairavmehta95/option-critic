@@ -29,6 +29,7 @@ def train(env_id, num_timesteps, seed, lrschedule, num_cpu):
     parser.add_argument('--log_interval',   help='log_interval',            default=100)
     parser.add_argument('--lr',             help='learning rate',           default=0.001)
     parser.add_argument('--nopts',          help='number of options' ,      default=4)
+    parser.add_argument('--log_dir',        help='log directory',           default='log')
 
     args = parser.parse_args()
 
