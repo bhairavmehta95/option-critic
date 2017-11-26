@@ -145,7 +145,7 @@ class Network():
                 layer = tf.layers.dense(
                     inputs=inputs,
                     units=self.nact,
-                    activation=None,
+                    activation=tf.nn.softmax,
                     name=name
                 )
 
@@ -211,5 +211,5 @@ class Network():
                 current_options[idx] = new_option
             else:
                 continue # Did not terminate
-
+                
         return current_options, costs

@@ -71,11 +71,11 @@ class Model():
         disconnected_value = tf.stop_gradient(self.value)
 
         # Losses; TODO: Why reduce sum vs reduce mean?
-        self.value_loss = vf_coef * tf.reduce_mean(vf_coef * tf.square(self.rewards - self.responsible_opt_q_vals))
+        self.value_loss = vf_coef * tf.reduce_mean(vf_coef * 0.5 * tf.square(self.rewards - self.responsible_opt_q_vals))
         self.policy_loss = tf.reduce_mean(tf.log(self.action_values) * (self.rewards - self.disconnected_q_vals_option))
         self.termination_loss = tf.reduce_mean(self.terminations * ((self.disconnected_q_vals_option - disconnected_value) + self.deliberation_costs) )
 
-        action_probabilities = tf.nn.softmax(self.train_model.intra_option_policies, dim=1)
+        action_probabilities = self.train_model.intra_option_policies
         self.entropy = ent_coef * tf.reduce_mean(action_probabilities * tf.log(action_probabilities))
 
         self.loss = -self.policy_loss - self.entropy - self.value_loss - self.termination_loss
@@ -98,7 +98,7 @@ class Model():
         summary.append(tf.summary.scalar('avg_reward', avg_reward))
         self.summary_op = tf.summary.merge(summary)
 
-        self.print_op = [relevant_networks[0], self.action_values, self.policy_loss, self.value_loss, self.termination_loss, avg_reward]
+        self.print_op = [self.policy_loss, self.value_loss, self.termination_loss, avg_reward]
 
         lr = Scheduler(v=lr, nvalues=total_timesteps, schedule=lrschedule)
 
